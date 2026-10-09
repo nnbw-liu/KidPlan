@@ -1,0 +1,340 @@
+@page "/settings/relay"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IRelayNodeService RelayNodes
+@inject RelayConnectionRegistry Registry
+@inject ISnackbar Snackbar
+@inject NavigationManager NavigationManager
+@inject IJSRuntime Js
+
+<PageTitle>本机中继 · KidPlan</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-1">🏠 本机中继</MudText>
+<MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+    用来解决一个网络拓扑上的死结：应用跑在云端，而你的模型跑在家里的电脑上。
+    服务器永远连不到你家的 <code>127.0.0.1</code>，所以把方向反过来——
+    你家电脑上的 <code>KidPlan.Relay</code> 主动连到服务器挂一条长连接，
+    服务器把模型请求顺着这条连接发下去，由它在本地发起请求。
+</MudText>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else
+{
+    @* ---------------- 刚创建的令牌：只显示这一次 ---------------- *@
+    @if (_newToken is not null)
+    {
+        <MudAlert Severity="Severity.Success" Variant="Variant.Filled" Class="mb-4">
+            <strong>令牌创建成功 —— 这串东西只显示这一次，现在就复制走</strong>
+            <div class="text-muted-sm" style="margin-top:4px">
+                库里只存了它的 SHA-256，页面关掉之后谁也拿不回来（只能删掉重建）。
+            </div>
+            <MudPaper Elevation="0" Class="pa-3 mt-2"
+                      Style="background:rgba(0,0,0,0.25);word-break:break-all;font-family:monospace">
+                @_newToken
+            </MudPaper>
+            <div class="d-flex flex-wrap gap-2 mt-2">
+                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Success"
+                           StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopyTokenAsync">
+                    复制令牌
+                </MudButton>
+                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _newToken = null)">
+                    我已经存好了
+                </MudButton>
+            </div>
+        </MudAlert>
+    }
+
+    @* ---------------- 三步说明 ---------------- *@
+    <MudPaper Elevation="0" Class="pa-4 mb-4">
+        <MudText Typo="Typo.subtitle2" Class="mb-2">三步接起来</MudText>
+        <MudText Typo="Typo.body2" Class="mb-1">
+            <strong>1.</strong> 在下面创建一个节点，把令牌复制走。
+        </MudText>
+        <MudText Typo="Typo.body2" Class="mb-1">
+            <strong>2.</strong> 在家里那台跑模型的电脑上解压中继程序，用令牌启动：
+        </MudText>
+        <MudPaper Elevation="0" Class="pa-2 my-2"
+                  Style="background:#1e1f26;color:#d6e2ff;font-family:monospace;font-size:0.8rem;overflow:auto">
+            KidPlan.Relay.exe --server @ServerHint --token 你的令牌
+        </MudPaper>
+        <MudText Typo="Typo.caption" Class="text-muted-sm mb-2">
+            想让它开机自动跑，加 <code>--install</code> 注册成计划任务或服务（见中继目录里的 README）。
+        </MudText>
+        <MudText Typo="Typo.body2" Class="mb-1">
+            <strong>3.</strong> 到 <a href="/settings/ai">模型设置</a> 里加一个端点，
+            调用方式选「本地中继」，<strong>接口根地址填中继那台电脑看到的地址</strong>
+            （例如 <code>http://127.0.0.1:1234/v1</code>）。
+        </MudText>
+        <MudText Typo="Typo.caption" Class="text-muted-sm">
+            手机 / 平板不需要装中继——它们访问的是云端页面，模型请求由你家里那台电脑转发，
+            所以人在外面也能用上自己电脑上的模型。前提只是那台电脑开着、中继连着。
+        </MudText>
+    </MudPaper>
+
+    @* ---------------- 新建节点 ---------------- *@
+    <MudPaper Elevation="1" Class="pa-4 mb-4">
+        <MudText Typo="Typo.subtitle2" Class="mb-3">新建中继节点</MudText>
+        <div class="d-flex flex-wrap gap-2 align-end">
+            <MudTextField T="string" @bind-Value="_newName" Label="节点名字" Variant="Variant.Outlined"
+                          Placeholder="例如：书房的台式机" Style="min-width:240px"
+                          HelperText="只是给你自己认的，可以随便起" />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_creating"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="CreateAsync">
+                创建并生成令牌
+            </MudButton>
+        </div>
+    </MudPaper>
+
+    @* ---------------- 节点列表 ---------------- *@
+    <MudText Typo="Typo.h6" Class="mb-2">我的节点（@_nodes.Count 个）</MudText>
+
+    @if (_nodes.Count == 0)
+    {
+        <MudPaper Elevation="0" Class="pa-6 text-center">
+            <MudText Typo="Typo.body2" Class="text-muted-sm">还没有中继节点。</MudText>
+        </MudPaper>
+    }
+
+    @foreach (var node in _nodes)
+    {
+        var online = Registry.IsOnline(node.Id);
+
+        <MudPaper Elevation="1" Class="pa-3 mb-2">
+            <div class="d-flex align-center flex-wrap gap-2">
+                <MudText Typo="Typo.subtitle1">@node.Name</MudText>
+
+                <MudChip T="string" Size="Size.Small"
+                         Color="@(online ? Color.Success : Color.Default)"
+                         Variant="@(online ? Variant.Filled : Variant.Outlined)">
+                    @(online ? "在线" : "离线")
+                </MudChip>
+
+                @if (!node.Enabled)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined">已禁用</MudChip>
+                }
+
+                <MudText Typo="Typo.caption" Class="text-muted-sm">令牌前缀 @node.TokenPrefix…</MudText>
+
+                <MudSpacer />
+
+                <MudSwitch T="bool" Value="node.Enabled" ValueChanged="@(v => SetEnabledAsync(node, v))"
+                           Color="Color.Primary" Label="启用" />
+
+                @if (online)
+                {
+                    <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Warning"
+                               StartIcon="@Icons.Material.Filled.LinkOff"
+                               OnClick="@(() => Kick(node))">
+                        断开当前连接
+                    </MudButton>
+                }
+
+                @if (_pendingDeleteId == node.Id)
+                {
+                    <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Error"
+                               OnClick="@(() => DeleteAsync(node))">
+                        确认删除
+                    </MudButton>
+                    <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _pendingDeleteId = null)">
+                        取消
+                    </MudButton>
+                }
+                else
+                {
+                    <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error"
+                                   title="删除节点" OnClick="@(() => _pendingDeleteId = node.Id)" />
+                }
+            </div>
+
+            <MudText Typo="Typo.caption" Class="text-muted-sm mt-1">
+                @if (node.LastSeenAt is { } seen)
+                {
+                    <span>最后心跳：@seen.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</span>
+                }
+                else
+                {
+                    <span>还没有连上来过</span>
+                }
+                @if (!string.IsNullOrWhiteSpace(node.MachineName))
+                {
+                    <span>　机器名：@node.MachineName</span>
+                }
+                @if (!string.IsNullOrWhiteSpace(node.AgentVersion))
+                {
+                    <span>　中继版本：@node.AgentVersion</span>
+                }
+            </MudText>
+        </MudPaper>
+    }
+
+    @* ---------------- 在线连接明细 ---------------- *@
+    @if (_connections.Count > 0)
+    {
+        <MudText Typo="Typo.h6" Class="mt-6 mb-2">当前连接</MudText>
+        <MudSimpleTable Dense="true" Hover="true">
+            <thead>
+                <tr>
+                    <th>节点</th>
+                    <th>机器名</th>
+                    <th>中继版本</th>
+                    <th>连接建立于</th>
+                    <th>最后活动</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var connection in _connections)
+                {
+                    <tr>
+                        <td>@connection.NodeName</td>
+                        <td>@connection.MachineName</td>
+                        <td>@connection.AgentVersion</td>
+                        <td>@connection.ConnectedAt.LocalDateTime.ToString("MM-dd HH:mm:ss")</td>
+                        <td>@connection.LastSeenAt.LocalDateTime.ToString("MM-dd HH:mm:ss")</td>
+                    </tr>
+                }
+            </tbody>
+        </MudSimpleTable>
+    }
+
+    <MudDivider Class="my-5" />
+
+    @* ---------------- 排错 ---------------- *@
+    <MudText Typo="Typo.h6" Class="mb-2">连不上时按这个顺序查</MudText>
+    <MudPaper Elevation="0" Class="pa-4">
+        <MudText Typo="Typo.body2" Class="mb-2">
+            <strong>① 中继显示「离线」，一直连不上。</strong>
+            多半是反向代理没放行 WebSocket。路径是 <code>/api/relay/connect</code>，
+            nginx 需要 <code>proxy_set_header Upgrade $http_upgrade;</code> 和
+            <code>proxy_set_header Connection "upgrade";</code>，
+            并且 <code>proxy_read_timeout</code> 要调大（长连接不能按默认 60 秒掐）。
+            中继目录里的 README 有完整配置。
+        </MudText>
+        <MudText Typo="Typo.body2" Class="mb-2">
+            <strong>② 中继在线，但测试连接报「没有中继在线」。</strong>
+            说明端点上指定的节点 Id 和实际连上来的对不上——把端点里的「用哪个中继节点」改成
+            「任意在线节点」试试。
+        </MudText>
+        <MudText Typo="Typo.body2" Class="mb-2">
+            <strong>③ 中继在线，但报「连不上本地模型」。</strong>
+            这是中继在一台电脑上发起的请求，所以地址要按那台电脑的视角填：
+            <code>http://127.0.0.1:1234/v1</code> 才对，写成服务器的地址一定失败。
+        </MudText>
+        <MudText Typo="Typo.body2">
+            <strong>④ 用手机怎么办？</strong>
+            不用管，什么都不用装。手机打开的是云端页面，模型请求走「云端 → 你家里电脑 → 本地模型」，
+            所以在外网也能用，只要家里那台电脑开着。
+        </MudText>
+    </MudPaper>
+}
+
+@code {
+    private bool _loading = true;
+    private bool _creating;
+    private IReadOnlyList<RelayNode> _nodes = [];
+    private IReadOnlyList<RelayConnection> _connections = [];
+    private string? _newToken;
+    private string? _newName;
+    private int? _pendingDeleteId;
+    private string _userId = string.Empty;
+
+    /// <summary>命令行里该写什么服务器地址：直接用浏览器访问的这个站点的地址，家长不用自己猜。</summary>
+    private string ServerHint
+    {
+        get
+        {
+            var uri = new Uri(NavigationManager.BaseUri);
+            var scheme = uri.Scheme == "https" ? "wss" : "ws";
+            var port = uri.IsDefaultPort ? string.Empty : $":{uri.Port}";
+            return $"{scheme}://{uri.Host}{port}";
+        }
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _userId = await GetUserIdAsync();
+        _nodes = await RelayNodes.ListAsync(_userId);
+        _connections = Registry.ListForOwner(_userId);
+        _loading = false;
+    }
+
+    private async Task CreateAsync()
+    {
+        _creating = true;
+        try
+        {
+            var (node, token) = await RelayNodes.CreateAsync(_userId, _newName ?? string.Empty);
+
+            _newToken = token;
+            _newName = null;
+
+            await LoadAsync();
+            Snackbar.Add($"已创建节点「{node.Name}」", Severity.Success);
+        }
+        catch (ArgumentException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private async Task CopyTokenAsync()
+    {
+        if (_newToken is null)
+        {
+            return;
+        }
+
+        // 剪贴板 API 在非 HTTPS 的局域网地址上不可用，所以失败时给出可操作的提示而不是静默失败。
+        try
+        {
+            await Js.InvokeVoidAsync("navigator.clipboard.writeText", _newToken);
+            Snackbar.Add("已复制到剪贴板", Severity.Success);
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("浏览器不让自动复制，请手动选中上面的令牌文本复制", Severity.Warning);
+        }
+    }
+
+    private async Task SetEnabledAsync(RelayNode node, bool enabled)
+    {
+        await RelayNodes.SetEnabledAsync(_userId, node.Id, enabled);
+
+        Snackbar.Add(
+            enabled ? $"已启用「{node.Name}」" : $"已禁用「{node.Name}」，正在挂着的连接已经断开",
+            Severity.Info);
+
+        await LoadAsync();
+    }
+
+    private void Kick(RelayNode node)
+    {
+        Registry.Kick(node.Id);
+        Snackbar.Add($"已断开「{node.Name}」的当前连接，它应该会在几秒内自动重连", Severity.Info);
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(500);
+            await InvokeAsync(LoadAsync);
+        });
+    }
+
+    private async Task DeleteAsync(RelayNode node)
+    {
+        await RelayNodes.DeleteAsync(_userId, node.Id);
+
+        _pendingDeleteId = null;
+        await LoadAsync();
+        Snackbar.Add($"已删除「{node.Name}」", Severity.Success);
+    }
+}

@@ -1,0 +1,189 @@
+@page "/"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildOverviewService OverviewService
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+
+<PageTitle>首页 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" Class="mb-4" />
+}
+else if (_overviews.Count == 0)
+{
+    <MudPaper Elevation="0" Class="pa-8 text-center">
+        <MudText Typo="Typo.h5" Class="mb-2">你好，@_displayName 👋</MudText>
+        <MudText Typo="Typo.body1" Class="text-muted-sm mb-6">
+            还没有登记小孩。先添加一个，之后就能记录身高体重、安排每天的饮食了。
+        </MudText>
+        <MudButton Href="/children/new"
+                   Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   Size="Size.Large"
+                   StartIcon="@Icons.Material.Filled.Add">
+            登记第一个小孩
+        </MudButton>
+    </MudPaper>
+}
+else
+{
+    <div class="d-flex align-center flex-wrap gap-2 mb-4">
+        <MudText Typo="Typo.h5">你好，@_displayName 👋</MudText>
+        <MudSpacer />
+        <MudButton Href="/children/new"
+                   Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Add">
+            登记新小孩
+        </MudButton>
+    </div>
+
+    <MudGrid>
+        @foreach (var overview in _overviews)
+        {
+            var child = overview.Child;
+            var meals = overview.TodayMeals;
+            var growth = overview.Growth;
+
+            <MudItem xs="12" md="6" lg="4">
+                <MudPaper Elevation="1" Class="pa-4" Style="height:100%">
+                    <div class="d-flex align-center mb-2">
+                        <span style="font-size:2rem;line-height:1">@(child.AvatarEmoji ?? Ui.GenderEmoji(child.Gender))</span>
+                        <div class="ml-3">
+                            <MudText Typo="Typo.h6">@child.Alias</MudText>
+                            <MudText Typo="Typo.caption" Class="text-muted-sm">
+                                @overview.AgeText · @child.Gender.ToChinese()
+                            </MudText>
+                        </div>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(child.AllergicFoods))
+                    {
+                        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mb-3">
+                            <span class="text-muted-sm">过敏食物：@child.AllergicFoods</span>
+                        </MudAlert>
+                    }
+
+                    <MudDivider Class="my-3" />
+
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">最新身体数据</MudText>
+                    @if (growth is null)
+                    {
+                        <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">还没有记录</MudText>
+                    }
+                    else
+                    {
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            @if (growth.HeightCm is { } h)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">
+                                    身高 @h.ToString("0.#") cm @DeltaText(growth.HeightDelta)
+                                </MudChip>
+                            }
+                            @if (growth.WeightKg is { } w)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">
+                                    体重 @w.ToString("0.##") kg @DeltaText(growth.WeightDelta)
+                                </MudChip>
+                            }
+                            @if (growth.Bmi is { } bmi)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">BMI @bmi.ToString("0.#")</MudChip>
+                            }
+                        </div>
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">
+                            最近记录：@growth.LatestDate?.ToString("yyyy-MM-dd")（共 @growth.RecordCount 条）
+                        </MudText>
+                    }
+
+                    <MudDivider Class="my-3" />
+
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">今天的饮食</MudText>
+                    @if (meals.TotalCount == 0)
+                    {
+                        <MudText Typo="Typo.body2" Class="text-muted-sm">今天还没有安排</MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2" Class="mb-1">
+                            已吃完 <strong>@meals.EatenCount</strong> / @meals.TotalCount 餐
+                        </MudText>
+                        @if (meals.OverdueCount > 0)
+                        {
+                            <MudAlert Severity="Severity.Warning" Variant="Variant.Text" Dense="true" Class="my-1">
+                                <span class="text-muted-sm">有 @meals.OverdueCount 餐过了饭点还没确认</span>
+                            </MudAlert>
+                        }
+                        @if (meals.AllergyRiskCount > 0)
+                        {
+                            <MudAlert Severity="Severity.Error" Variant="Variant.Text" Dense="true" Class="my-1">
+                                <span class="text-muted-sm">有 @meals.AllergyRiskCount 餐可能含过敏食物</span>
+                            </MudAlert>
+                        }
+                    }
+
+                    <MudDivider Class="my-3" />
+
+                    <div class="d-flex flex-wrap gap-2">
+                        <MudButton Size="Size.Small"
+                                   Variant="Variant.Filled"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.MonitorHeart"
+                                   OnClick="@(() => Go($"/children/{child.Id}/body"))">
+                            身体管理
+                        </MudButton>
+                        <MudButton Size="Size.Small"
+                                   Variant="Variant.Outlined"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.ShowChart"
+                                   OnClick="@(() => Go($"/children/{child.Id}/growth"))">
+                            成长曲线
+                        </MudButton>
+                        <MudButton Size="Size.Small"
+                                   Variant="Variant.Outlined"
+                                   Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.Restaurant"
+                                   OnClick="@(() => Go($"/children/{child.Id}/meals"))">
+                            饮食安排
+                        </MudButton>
+                    </div>
+                </MudPaper>
+            </MudItem>
+        }
+    </MudGrid>
+}
+
+@code {
+    private bool _loading = true;
+    private string _displayName = string.Empty;
+    private IReadOnlyList<ChildOverview> _overviews = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        var userId = await GetUserIdAsync();
+        _displayName = await GetDisplayNameAsync();
+        _overviews = await OverviewService.BuildAllAsync(userId);
+
+        // 只有一个小孩时直接设为当前小孩，顶部切换器和导航立刻可用。
+        if (_overviews.Count == 1)
+        {
+            CurrentChild.Select(_overviews[0].Child.Id);
+        }
+
+        _loading = false;
+    }
+
+    private void Go(string url) => NavigationManager.NavigateTo(url);
+
+    private static string DeltaText(decimal? delta) => delta switch
+    {
+        null => string.Empty,
+        > 0 => $"↑{delta.Value:0.##}",
+        < 0 => $"↓{Math.Abs(delta.Value):0.##}",
+        _ => "持平",
+    };
+}

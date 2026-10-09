@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>KidPlan.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- 版本必须与 Web 项目的 EF Core 9 对齐（Pomelo 9 只支持 EF Core 9）。 -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.20" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\KidPlan.Web\KidPlan.Web.csproj" />
+    <!--
+      引用中继是为了覆盖它两处「安全 / 地址解析」逻辑：
+      转发目标是否属于本机内网、服务器地址怎么规范化。
+      这两块出错的表现是「连不上」或者「变成开放代理」，都不好排查，值得有测试盯着。
+    -->
+    <ProjectReference Include="..\..\src\KidPlan.Relay\KidPlan.Relay.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

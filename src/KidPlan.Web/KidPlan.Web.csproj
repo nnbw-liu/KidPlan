@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>aspnet-KidPlan_Web-3e1fbbea-8c3f-4bb4-bbe7-04b2747ff822</UserSecretsId>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      EF Core 固定在 9.0.x，而不是跟 .NET 10 一起升到 10.0.x。
+      原因：Pomelo.EntityFrameworkCore.MySql 9.0.0 是目前唯一对 MySQL 8 + ASP.NET Core Identity 成熟的适配器，
+      它的依赖范围是 [9.0.0, 9.0.999]。EF Core 10 对应的 Pomelo 10 还没有发布；
+      而 Oracle 官方 Provider(MySql.EntityFrameworkCore 10.0.9) 不支持 EF 基元集合(string[])，
+      会导致 Identity 的 Passkey 实体无法建模。因此本项目：升级 .NET 10 + 保留 EF Core 9 + 不启用 Passkey。
+      等 Pomelo 10 发布后，把这 5 个包一起升到 10.x 即可恢复 Passkey。
+    -->
+    <PackageReference Include="MailKit" Version="4.18.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.20" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.20" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.20" />
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
+
+    <!--
+      UI：MudBlazor（MIT）。成长曲线用 MudBlazor 自带的 MudChart 画，
+      不再额外引入 Blazor-ApexCharts：少一个前端图表库和它的一整套 JS 资源，
+      自己服务器上的部署更简单。
+
+      ApexCharts 从 2025-06-26 起改了授权：年营收/预算/融资达到 200 万美元的组织
+      需要买商业授权，低于这个数仍然按 Community 授权免费使用。
+      所以授权只是次要考虑，不是硬性阻碍。图形的渲染集中在
+      Components/Shared/MetricChart.razor 一个文件里（只吃 Labels + Values 两个数组），
+      想换回 ApexCharts 或换 ECharts，改那一个文件就行。
+    -->
+    <PackageReference Include="MudBlazor" Version="9.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      把 internal 开放给测试项目。
+      只为了测两类「算法型」成员：模型输出的 JSON 容错解析、曲线插值/归一化。
+      它们是纯函数、出错又最难查，但没必要为了可测就提升成 public API。
+    -->
+    <InternalsVisibleTo Include="KidPlan.Tests" />
+  </ItemGroup>
+
+</Project>

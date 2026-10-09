@@ -1,0 +1,131 @@
+@implements IDisposable
+@inject NavigationManager NavigationManager
+@inject CurrentChildState CurrentChild
+@inject IChildService ChildService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject UserManager<ApplicationUser> UserManager
+
+<MudMenu Dense="true"
+         AnchorOrigin="Origin.BottomRight"
+         TransformOrigin="Origin.TopRight"
+         Class="ml-2"
+         @bind-Open="_menuOpen">
+    <ActivatorContent>
+        @* 激活器上的 OnClick="ToggleMenu" 不能省。MudBlazor 9.11.0 的 MudMenu 只有在它
+             自己用 Label/Icon 生成激活器时才会挂“开/关菜单”的点击处理；一旦换成自定义
+             ActivatorContent，那个处理在生成的代码里就没了——激活器上照样有 _bl_ 事件 id、
+             点击也确实发到了服务器，但 aria-expanded 恒为 false，菜单永远弹不出来。
+             所以这里由 ToggleMenu 手动翻转 _menuOpen（@bind-Open 双向绑定）。 *@
+        <div class="child-switcher-activator">
+            <MudButton Variant="Variant.Text"
+                       Color="Color.Inherit"
+                       EndIcon="@Icons.Material.Filled.ArrowDropDown"
+                       Class="child-switcher-btn"
+                       OnClick="ToggleMenu">
+                <span class="child-switcher-emoji">@(_currentChild?.AvatarEmoji ?? "🧒")</span>
+                <span class="child-switcher-name">@(_currentChild?.Alias ?? "选择小孩")</span>
+            </MudButton>
+        </div>
+    </ActivatorContent>
+    <ChildContent>
+        @if (_children.Count == 0)
+        {
+            <MudMenuItem OnClick="@(() => NavigationManager.NavigateTo("/children/new"))">
+                还没有小孩，去登记一个
+            </MudMenuItem>
+        }
+        else
+        {
+            @foreach (var child in _children)
+            {
+                <MudMenuItem OnClick="@(() => SelectAsync(child.Id))">
+                    <span class="child-switcher-emoji">@(child.AvatarEmoji ?? "🧒")</span>
+                    @child.Alias
+                    @if (child.Id == _currentChild?.Id)
+                    {
+                        <MudIcon Icon="@Icons.Material.Filled.Check" Size="Size.Small" Class="ml-2" />
+                    }
+                </MudMenuItem>
+            }
+
+            <MudDivider Class="my-1" />
+            <MudMenuItem OnClick="@(() => NavigationManager.NavigateTo("/children/new"))">
+                ＋ 登记新小孩
+            </MudMenuItem>
+            <MudMenuItem OnClick="@(() => NavigationManager.NavigateTo("/children"))">
+                管理所有小孩
+            </MudMenuItem>
+        }
+    </ChildContent>
+</MudMenu>
+
+@code {
+    private IReadOnlyList<Child> _children = [];
+    private Child? _currentChild;
+
+    /// <summary>
+    /// 菜单开合状态。之所以要自己拿在手里（<c>@bind-Open</c>）而不是交给 MudMenu 自己管：
+    /// 见 ActivatorContent 上面的说明——MudBlazor 9.11.0 在自定义激活器时不会挂点击处理，
+    /// 只能由激活器上的 <c>OnClick="ToggleMenu"</c> 手动翻转这个字段。
+    /// </summary>
+    private bool _menuOpen;
+
+    private void ToggleMenu() => _menuOpen = !_menuOpen;
+
+    protected override async Task OnInitializedAsync()
+    {
+        NavigationManager.LocationChanged += OnLocationChanged;
+        await LoadAsync();
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        if (authState.User.Identity?.IsAuthenticated != true)
+        {
+            return;
+        }
+
+        var userId = UserManager.GetUserId(authState.User);
+        if (userId is null)
+        {
+            return;
+        }
+
+        _children = await ChildService.ListAsync(userId);
+
+        // URL 里的 id 优先，其次用公共状态里记住的那个，最后兜底到第一个小孩。
+        var childId = UrlChildId.TryParse(NavigationManager.Uri)
+            ?? CurrentChild.ChildId
+            ?? _children.FirstOrDefault()?.Id;
+
+        _currentChild = childId is { } id ? _children.FirstOrDefault(c => c.Id == id) : null;
+
+        if (_currentChild is null && _children.Count > 0)
+        {
+            _currentChild = _children[0];
+        }
+
+        if (_currentChild is not null)
+        {
+            CurrentChild.Select(_currentChild.Id);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SelectAsync(int childId)
+    {
+        _menuOpen = false;
+        CurrentChild.Select(childId);
+        _currentChild = _children.FirstOrDefault(c => c.Id == childId);
+
+        // 切到该小孩的身体管理页，这是他的“主页”（成长曲线是另一页，从那里再点过去）。
+        NavigationManager.NavigateTo($"/children/{childId}/body");
+        await Task.CompletedTask;
+    }
+
+    public void Dispose() => NavigationManager.LocationChanged -= OnLocationChanged;
+}

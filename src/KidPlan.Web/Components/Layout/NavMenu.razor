@@ -1,0 +1,142 @@
+@implements IDisposable
+@inject NavigationManager NavigationManager
+@inject CurrentChildState CurrentChild
+@inject IChildService ChildService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject UserManager<ApplicationUser> UserManager
+
+<MudNavMenu Class="pa-2">
+    <MudNavLink Href="/" Match="NavLinkMatch.All" Icon="@Icons.Material.Filled.Home">首页</MudNavLink>
+    <MudNavLink Href="/children" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.ChildCare">小孩管理</MudNavLink>
+
+    @if (_currentChildId is { } childId)
+    {
+        <MudDivider Class="my-2" />
+        <MudText Typo="Typo.overline" Class="px-4 py-1">当前小孩 · @_currentChildName</MudText>
+        @* 身体管理和成长曲线是两个页面：一页记数据、一页看曲线，
+           以前挤在一页里，看曲线要先滚过半屏表单。 *@
+        <MudNavLink Href="@($"/children/{childId}/body")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.MonitorHeart">身体管理</MudNavLink>
+        <MudNavLink Href="@($"/children/{childId}/growth")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.ShowChart">成长曲线</MudNavLink>
+        <MudNavLink Href="@($"/children/{childId}/meals")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.Restaurant">饮食安排</MudNavLink>
+        <MudNavLink Href="@($"/children/{childId}/meal-history")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.History">餐饮记录</MudNavLink>
+        <MudNavLink Href="@($"/children/{childId}/allergens")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.Coronavirus">过敏原管理</MudNavLink>
+        <MudNavLink Href="@($"/children/{childId}/edit")"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.Edit">编辑资料</MudNavLink>
+    }
+    else
+    {
+        <MudDivider Class="my-2" />
+        <MudText Typo="Typo.caption" Class="px-4 py-2 mud-text-secondary">
+            还没有选择小孩，先到「小孩管理」登记一个吧。
+        </MudText>
+    }
+
+    @if (_isAuthenticated)
+    {
+        <MudDivider Class="my-2" />
+        <MudText Typo="Typo.overline" Class="px-4 py-1">模型</MudText>
+        <MudNavLink Href="/settings/ai"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.SmartToy">模型设置</MudNavLink>
+        <MudNavLink Href="/settings/relay"
+                    Match="NavLinkMatch.Prefix"
+                    Icon="@Icons.Material.Filled.Router">本机中继</MudNavLink>
+
+        <MudDivider Class="my-2" />
+        <MudNavLink Href="/account/manage" Icon="@Icons.Material.Filled.Person">账号设置</MudNavLink>
+    }
+</MudNavMenu>
+
+@if (_isAuthenticated)
+{
+    <div class="drawer-footer">
+        <MudText Typo="Typo.caption" Class="px-4">@_userLabel</MudText>
+        <form action="Account/Logout" method="post" class="logout-form">
+            <AntiforgeryToken />
+            <input type="hidden" name="ReturnUrl" value="/" />
+            <button type="submit" class="logout-btn">
+                <MudIcon Icon="@Icons.Material.Filled.Logout" Size="Size.Small" />
+                退出登录
+            </button>
+        </form>
+    </div>
+}
+
+@code {
+    private int? _currentChildId;
+    private string _currentChildName = string.Empty;
+    private string _userLabel = string.Empty;
+    private bool _isAuthenticated;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // 页面 URL（/children/{id}/...）是“当前小孩”的权威来源，
+        // 因此监听导航变化即可，不需要额外的跨组件事件。
+        NavigationManager.LocationChanged += OnLocationChanged;
+        await RefreshAsync();
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = RefreshAsync();
+
+    private async Task RefreshAsync()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        _isAuthenticated = user.Identity?.IsAuthenticated == true;
+        if (!_isAuthenticated)
+        {
+            _userLabel = string.Empty;
+            _currentChildId = null;
+            _currentChildName = string.Empty;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        _userLabel = user.Identity!.Name ?? string.Empty;
+
+        var userId = UserManager.GetUserId(user);
+        if (userId is null)
+        {
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        var children = await ChildService.ListAsync(userId);
+
+        // 优先用 URL 里的 id；没有就退回“上次看过的小孩”，再退回第一个。
+        var childId = UrlChildId.TryParse(NavigationManager.Uri)
+            ?? CurrentChild.ChildId
+            ?? children.FirstOrDefault()?.Id;
+
+        var child = childId is { } id ? children.FirstOrDefault(c => c.Id == id) : null;
+
+        if (childId is { } validId && child is not null)
+        {
+            CurrentChild.Select(validId);
+            _currentChildId = validId;
+            _currentChildName = child.Alias;
+        }
+        else
+        {
+            CurrentChild.Clear();
+            _currentChildId = null;
+            _currentChildName = string.Empty;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => NavigationManager.LocationChanged -= OnLocationChanged;
+}

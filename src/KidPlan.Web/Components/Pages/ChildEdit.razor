@@ -1,0 +1,330 @@
+@page "/children/new"
+@page "/children/{Id:int}/edit"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject ISnackbar Snackbar
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+
+<PageTitle>@(IsNew ? "登记小孩" : "编辑小孩资料") · KidPlan</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-1">@(IsNew ? "登记一个新小孩" : $"编辑「{_model.Alias}」的资料")</MudText>
+<MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+    @(IsNew
+        ? "带 * 的是必填项。之后随时可以回来补充或修改。"
+        : "修改后点击保存即可。")
+</MudText>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_notFound)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    @if (_message is not null)
+    {
+        <MudAlert Severity="@_messageSeverity" Variant="Variant.Outlined" Class="mb-4">@_message</MudAlert>
+    }
+
+    <MudPaper Elevation="1" Class="pa-4 pa-md-6">
+        <MudGrid>
+            <MudItem xs="12" md="6">
+                <MudTextField T="string"
+                              @bind-Value="_model.Alias"
+                              Label="别名 / 小名 *"
+                              Variant="Variant.Outlined"
+                              Placeholder="例如：糖糖"
+                              HelperText="列表和顶部切换器都用它显示"
+                              MaxLength="50" />
+            </MudItem>
+
+            <MudItem xs="12" md="6">
+                <MudTextField T="string"
+                              @bind-Value="_model.FullName"
+                              Label="姓名（可选）"
+                              Variant="Variant.Outlined"
+                              MaxLength="50" />
+            </MudItem>
+
+            <MudItem xs="12" md="4">
+                <MudDatePicker @bind-Date="_birthDate"
+                               Label="出生年月 *"
+                               Variant="Variant.Outlined"
+                               DateFormat="yyyy-MM-dd"
+                               HelperText="@AgeHint()"
+                               Required="true" />
+            </MudItem>
+
+            <MudItem xs="12" md="4">
+                <MudSelect T="Gender" @bind-Value="_model.Gender" Label="性别" Variant="Variant.Outlined">
+                    <MudSelectItem T="Gender" Value="Gender.Boy">男孩</MudSelectItem>
+                    <MudSelectItem T="Gender" Value="Gender.Girl">女孩</MudSelectItem>
+                    <MudSelectItem T="Gender" Value="Gender.Unspecified">不填</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+
+            <MudItem xs="12" md="4">
+                <MudSelect T="string" @bind-Value="_model.BloodType" Label="血型（可选）" Variant="Variant.Outlined">
+                    <MudSelectItem T="string" Value="@((string?)null)">不填</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("A")">A 型</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("B")">B 型</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("O")">O 型</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("AB")">AB 型</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+
+            <MudItem xs="12">
+                <MudText Typo="Typo.subtitle2" Class="mb-2">选一个头像</MudText>
+                <div class="d-flex flex-wrap gap-1">
+                    @foreach (var emoji in Emojis)
+                    {
+                        var selected = _model.AvatarEmoji == emoji;
+                        <button type="button"
+                                class="emoji-pick @(selected ? "emoji-pick-active" : "")"
+                                @onclick="@(() => _model.AvatarEmoji = _model.AvatarEmoji == emoji ? null : emoji)"
+                                aria-label="选择头像 @emoji">
+                            @emoji
+                        </button>
+                    }
+                </div>
+            </MudItem>
+
+            <MudItem xs="12" md="6">
+                <MudTextField T="string"
+                              @bind-Value="_model.Hobbies"
+                              Label="爱好"
+                              Variant="Variant.Outlined"
+                              Lines="2"
+                              Placeholder="例如：拼积木、画画、听故事"
+                              HelperText="用逗号分隔"
+                              MaxLength="500" />
+            </MudItem>
+
+            <MudItem xs="12" md="6">
+                <MudTextField T="string"
+                              @bind-Value="_model.FavoriteSports"
+                              Label="喜欢的运动"
+                              Variant="Variant.Outlined"
+                              Lines="2"
+                              Placeholder="例如：骑车、游泳、跑跳"
+                              HelperText="用逗号分隔"
+                              MaxLength="500" />
+            </MudItem>
+
+            <MudItem xs="12">
+                @* 过敏原改到独立页面维护：它现在是一条条带等级的记录，
+                   塞进这个表单里会变成「一格子自由文本 + 一个等级」，没法表达「牛奶是强过敏、花粉只是轻微」。 *@
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true">
+                    🧬 过敏原（含严重程度）已经挪到单独的
+                    <a href="@AllergenUrl">过敏原管理</a> 页面，
+                    那里可以一条条设等级，饮食安排会按等级决定提醒强度。
+                    @if (Id is not null && _allergenCount == 0)
+                    {
+                        <strong> 这个小孩目前还没有登记过敏原。</strong>
+                    }
+                    else if (Id is not null)
+                    {
+                        <span> 目前已登记 @_allergenCount 条。</span>
+                    }
+                </MudAlert>
+            </MudItem>
+
+            <MudItem xs="12">
+                <MudTextField T="string"
+                              @bind-Value="_model.Notes"
+                              Label="其他备注"
+                              Variant="Variant.Outlined"
+                              Lines="3"
+                              Placeholder="例如：既往病史、正在吃的药、需要特别注意的事"
+                              MaxLength="1000" />
+            </MudItem>
+        </MudGrid>
+
+        <MudDivider Class="my-4" />
+
+        <div class="d-flex flex-wrap gap-2 align-center">
+            <MudButton Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       Size="Size.Large"
+                       Disabled="_saving"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       OnClick="SaveAsync">
+                @(IsNew ? "保存并开始记录" : "保存修改")
+            </MudButton>
+
+            <MudButton Variant="Variant.Text" OnClick="@(() => NavigationManager.NavigateTo("/children"))">
+                返回列表
+            </MudButton>
+
+            @if (!IsNew)
+            {
+                <MudSpacer />
+                @if (_confirmDelete)
+                {
+                    <MudAlert Severity="Severity.Error" Variant="Variant.Text" Dense="true" Class="mr-2">
+                        删除后该小孩的身体记录和饮食安排都会一并删除，且无法恢复。
+                    </MudAlert>
+                    <MudButton Variant="Variant.Filled" Color="Color.Error" OnClick="DeleteAsync">确认删除</MudButton>
+                    <MudButton Variant="Variant.Text" OnClick="@(() => _confirmDelete = false)">取消</MudButton>
+                }
+                else
+                {
+                    <MudButton Variant="Variant.Outlined"
+                               Color="Color.Error"
+                               StartIcon="@Icons.Material.Filled.Delete"
+                               OnClick="@(() => _confirmDelete = true)">
+                        删除这个小孩
+                    </MudButton>
+                }
+            }
+        </div>
+    </MudPaper>
+}
+
+@code {
+    private static readonly string[] Emojis =
+    [
+        "🧒", "👦", "👧", "🐣", "🐻", "🐰", "🐼", "🦊", "🐯", "🦁",
+        "🐨", "🐸", "🐧", "🦄", "🐳", "🌟", "🍀", "🎈",
+    ];
+
+    private bool _loading = true;
+    private bool _saving;
+    private bool _notFound;
+    private bool _confirmDelete;
+    private Child _model = new();
+    private int _allergenCount;
+    private DateOnly? _birthDateValue = DateOnly.FromDateTime(DateTime.Today);
+    private DateTime? _birthDate = DateTime.Today;
+    private string? _message;
+    private Severity _messageSeverity = Severity.Error;
+
+    [Parameter]
+    public int? Id { get; set; }
+
+    private bool IsNew => Id is null or 0;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        if (IsNew)
+        {
+            _model = new Child { BirthDate = DateOnly.FromDateTime(DateTime.Today) };
+            _birthDateValue = _model.BirthDate;
+            _birthDate = _model.BirthDate.ToDateTimeValue();
+            _loading = false;
+            return;
+        }
+
+        var existing = await ChildService.FindAsync(Id!.Value, userId);
+        if (existing is null)
+        {
+            _notFound = true;
+            _loading = false;
+            return;
+        }
+
+        _model = existing;
+        _birthDateValue = existing.BirthDate;
+        _birthDate = existing.BirthDate.ToDateTimeValue();
+        _allergenCount = (await ChildService.ListAllergensAsync(existing.Id, userId)).Count;
+        _loading = false;
+    }
+
+    /// <summary>「过敏原管理」页的地址。新建时还没 Id，就先指向小孩列表。</summary>
+    private string AllergenUrl => Id is { } id ? $"/children/{id}/allergens" : "/children";
+
+    private string AgeHint()
+    {
+        if (_birthDateValue is not { } birthDate)
+        {
+            return "选择出生日期，用于计算月龄和成长曲线";
+        }
+
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        return AgeCalculator.IsPlausibleBirthDate(birthDate, today)
+            ? $"现在 {AgeCalculator.Describe(birthDate, today)}（{AgeCalculator.MonthsBetween(birthDate, today)} 个月）"
+            : "这个日期看起来不太对，请检查";
+    }
+
+    private async Task SaveAsync()
+    {
+        _message = null;
+        _saving = true;
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_model.Alias))
+            {
+                _messageSeverity = Severity.Error;
+                _message = "请填写小孩的别名。";
+                return;
+            }
+
+            if (_birthDate.ToDateOnly() is not { } birthDate)
+            {
+                _messageSeverity = Severity.Error;
+                _message = "请选择出生年月。";
+                return;
+            }
+
+            _model.BirthDate = birthDate;
+
+            var userId = await GetUserIdAsync();
+
+            if (IsNew)
+            {
+                var created = await ChildService.CreateAsync(userId, _model);
+
+                // 新建后立即设为当前小孩，导航和切换器直接指向他。
+                CurrentChild.Select(created.Id);
+                Snackbar.Add($"已登记「{created.Alias}」", Severity.Success);
+                NavigationManager.NavigateTo($"/children/{created.Id}/body");
+            }
+            else
+            {
+                await ChildService.UpdateAsync(userId, _model);
+                Snackbar.Add("资料已保存", Severity.Success);
+                NavigationManager.NavigateTo("/children");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            _messageSeverity = Severity.Error;
+            _message = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (Id is not { } childId)
+        {
+            return;
+        }
+
+        var userId = await GetUserIdAsync();
+        await ChildService.DeleteAsync(userId, childId);
+
+        if (CurrentChild.ChildId == childId)
+        {
+            CurrentChild.Select(null);
+        }
+
+        Snackbar.Add($"已删除「{_model.Alias}」", Severity.Success);
+        NavigationManager.NavigateTo("/children");
+    }
+}

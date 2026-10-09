@@ -1,0 +1,536 @@
+@page "/children/{ChildId:int}/growth"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject IGrowthService GrowthService
+@inject CurrentChildState CurrentChild
+@inject GrowthViewState ViewState
+@inject NavigationManager NavigationManager
+
+@* =====================================================================
+   成长曲线：只负责「把记录画出来」。
+
+   记录本身（增 / 改 / 删、最新数值、历史列表）在另一个页面
+   /children/{id}/body（身体管理）。以前两件事挤在一页：
+   想看曲线要先滚过半屏表单和表格，想改一条记录又得滚回去。
+   ===================================================================== *@
+
+<PageTitle>成长曲线 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_child is null)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    @* ---------------- 头部 ---------------- *@
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <span style="font-size:2rem;line-height:1">@(_child.AvatarEmoji ?? Ui.GenderEmoji(_child.Gender))</span>
+        <MudText Typo="Typo.h5">@_child.Alias 的成长曲线</MudText>
+        <MudSpacer />
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.MonitorHeart"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/body"))">
+            去记录身体情况
+        </MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+        @_ageText · 出生 @_child.BirthDate.ToString("yyyy-MM-dd")
+        · 新增 / 修改 / 删除记录在
+        <a href="@($"/children/{ChildId}/body")">身体管理</a>
+    </MudText>
+
+    @* ---------------- 成长曲线 ---------------- *@
+    <MudText Typo="Typo.h6" Class="mt-2 mb-2">成长曲线</MudText>
+
+
+    <MudPaper Elevation="0" Class="pa-3 mb-3">
+        @* 指标多选：想要哪几条线就勾哪几条 *@
+        <MudText Typo="Typo.caption" Class="text-muted-sm mb-1">选择要画的指标（可多选）</MudText>
+        <div class="d-flex flex-wrap gap-1 mb-3">
+            @foreach (var metric in GrowthMetrics.All)
+            {
+                var selected = ViewState.EffectiveMetrics.Contains(metric);
+                var hasData = _chart.Has(metric);
+                <MudChip T="string"
+                         Size="Size.Small"
+                         Color="@(selected ? Color.Primary : Color.Default)"
+                         Variant="@(selected ? Variant.Filled : Variant.Outlined)"
+                         OnClick="@(() => ToggleMetric(metric))">
+                    @GrowthMetrics.Title(metric)
+                    @if (!hasData)
+                    {
+                        <span class="text-muted-sm">（无数据）</span>
+                    }
+                </MudChip>
+            }
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 align-center mb-2">
+            <MudButtonGroup Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary">
+                <MudButton Color="@(!ViewState.Overlay ? Color.Primary : Color.Default)"
+                           Variant="@(!ViewState.Overlay ? Variant.Filled : Variant.Outlined)"
+                           StartIcon="@Icons.Material.Filled.ViewAgenda"
+                           OnClick="@(() => SetOverlay(false))">
+                    分图
+                </MudButton>
+                <MudButton Color="@(ViewState.Overlay ? Color.Primary : Color.Default)"
+                           Variant="@(ViewState.Overlay ? Variant.Filled : Variant.Outlined)"
+                           StartIcon="@Icons.Material.Filled.MultilineChart"
+                           OnClick="@(() => SetOverlay(true))">
+                    叠加
+                </MudButton>
+            </MudButtonGroup>
+
+            @if (ViewState.Overlay)
+            {
+                <MudSwitch T="bool" Value="ViewState.Normalize" ValueChanged="SetNormalize"
+                           Color="Color.Primary" Label="归一化（只比走势）"
+                           UncheckedColor="Color.Default" />
+            }
+
+            <MudSpacer />
+
+            <MudSelect T="RecordKind?" Value="ViewState.KindFilter" ValueChanged="SetKindFilter"
+                       Label="记录方式" Variant="Variant.Outlined" Dense="true"
+                       Style="max-width:190px"
+                       HelperText="点/时段分开看">
+                <MudSelectItem T="RecordKind?" Value="@((RecordKind?)null)">全部记录</MudSelectItem>
+                <MudSelectItem T="RecordKind?" Value="@((RecordKind?)RecordKind.Point)">只看单次记录</MudSelectItem>
+                <MudSelectItem T="RecordKind?" Value="@((RecordKind?)RecordKind.Period)">只看时段记录</MudSelectItem>
+            </MudSelect>
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 align-center">
+            <MudButtonGroup Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary">
+                @foreach (var option in RangeOptions)
+                {
+                    <MudButton Color="@(!ViewState.UseCustomRange && ViewState.RangeMonths == option.Months ? Color.Primary : Color.Default)"
+                               Variant="@(!ViewState.UseCustomRange && ViewState.RangeMonths == option.Months ? Variant.Filled : Variant.Outlined)"
+                               OnClick="@(() => SetRange(option.Months))">
+                        @option.Label
+                    </MudButton>
+                }
+                <MudButton Color="@(ViewState.UseCustomRange ? Color.Primary : Color.Default)"
+                           Variant="@(ViewState.UseCustomRange ? Variant.Filled : Variant.Outlined)"
+                           OnClick="() => SetUseCustomRange(true)">
+                    自定义
+                </MudButton>
+            </MudButtonGroup>
+
+            @if (ViewState.UseCustomRange)
+            {
+                <MudDatePicker Date="_customFrom" DateChanged="SetCustomFrom"
+                               Label="从" Variant="Variant.Outlined" DateFormat="yyyy-MM-dd"
+                               Style="max-width:160px" />
+                <MudDatePicker Date="_customTo" DateChanged="SetCustomTo"
+                               Label="到" Variant="Variant.Outlined" DateFormat="yyyy-MM-dd"
+                               Style="max-width:160px" />
+            }
+
+            <MudText Typo="Typo.caption" Class="text-muted-sm">@_chartDescription</MudText>
+        </div>
+    </MudPaper>
+
+    @if (_chart.Points.Count == 0)
+    {
+        <MudPaper Elevation="0" Class="pa-6">
+            <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">
+                还画不出曲线：当前筛选条件下没有可用的记录。
+            </MudText>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.Add"
+                       OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/body"))">
+                去身体管理记一条
+            </MudButton>
+        </MudPaper>
+    }
+    else if (PlottedMetrics.Count == 0)
+    {
+        @* 有记录、但勾的指标一个数值都没有——最典型的就是把「记录方式」切到
+           「只看时段记录」，而那条时段记录只记了睡眠/运动/食欲/精神，
+           曲线勾的却是身高/体重/BMI。以前这里什么都不显示，看上去就是「曲线出不来」。 *@
+        <MudPaper Elevation="0" Class="pa-6">
+            <MudText Typo="Typo.body1" Class="mb-1">
+                勾选的指标在这一档里没有数据，所以画不出曲线。
+            </MudText>
+            <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">
+                当前筛选条件是 @_chartDescription（共 @_chart.Points.Count 个记录点）。
+                @if (AvailabilityMetrics.Count > 0)
+                {
+                    <span>
+                        这一档里有数据的指标是：<strong>@string.Join("、", AvailabilityMetrics.Select(GrowthMetrics.Title))</strong>。
+                    </span>
+                }
+                else
+                {
+                    <span>这些记录只填了症状 / 备注，没有任何可画的数值。</span>
+                }
+            </MudText>
+
+            @if (AvailabilityMetrics.Count > 0)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Small"
+                           StartIcon="@Icons.Material.Filled.Check" OnClick="SelectAvailableMetrics">
+                    改勾这几个指标（@AvailabilityMetrics.Count 个）
+                </MudButton>
+            }
+        </MudPaper>
+    }
+    else if (ViewState.Overlay)
+    {
+        if (_overlayLabels.Count == 0)
+        {
+            <MudPaper Elevation="0" Class="pa-6 text-center">
+                <MudText Typo="Typo.body2" Class="text-muted-sm">
+                    勾选的指标里还没有任何数据。换几个指标试试。
+                </MudText>
+            </MudPaper>
+        }
+        else
+        {
+            <MetricChart Title="@_overlayTitle"
+                         Unit="@_overlayUnit"
+                         Labels="_overlayLabels"
+                         Lines="_overlayLines"
+                         TickLabels="_overlayTicks"
+                         Height="320px"
+                         Hint="@_overlayHint" />
+        }
+    }
+    else
+    {
+        <MudGrid>
+            @foreach (var metric in SelectedMetricsInOrder())
+            {
+                var (labels, values) = _chart.Series(metric);
+                if (labels.Count == 0)
+                {
+                    continue;
+                }
+
+                var unit = GrowthMetrics.Unit(metric);
+                var lineName = string.IsNullOrEmpty(unit)
+                    ? GrowthMetrics.Title(metric)
+                    : $"{GrowthMetrics.Title(metric)} ({unit})";
+
+                <MudItem xs="12" md="6">
+                    <MetricChart Title="@GrowthMetrics.Title(metric)"
+                                 Unit="@unit"
+                                 Labels="labels"
+                                 Lines="@(new[] { new ChartLine(lineName, values) })"
+                                 TickLabels="@GrowthMetrics.TickLabels(metric)?.ToArray()" />
+                </MudItem>
+            }
+        </MudGrid>
+    }
+
+    <MudText Typo="Typo.caption" Class="text-muted-sm mt-2">
+        说明：曲线只画有测量数值的记录。叠加模式会取各指标日期的并集，
+        缺失处按相邻两点线性插值；勾了「归一化」则把每条线各自拉到 0~100，只比走势不比绝对值。
+    </MudText>
+
+}
+
+@code {
+    private static readonly (int? Months, string Label)[] RangeOptions =
+    [
+        (3, "近 3 个月"),
+        (6, "近 6 个月"),
+        (12, "近 1 年"),
+        (null, "全部"),
+    ];
+
+    private bool _loading = true;
+    private Child? _child;
+    private string _ageText = string.Empty;
+    private GrowthChartData _chart = new(DateOnly.FromDateTime(DateTime.Today), []);
+    private string _chartDescription = string.Empty;
+
+    private DateTime? _customFrom;
+    private DateTime? _customTo;
+
+    private List<string> _overlayLabels = [];
+    private List<ChartLine> _overlayLines = [];
+    private string[]? _overlayTicks;
+    private string _overlayTitle = "指标对比";
+    private string _overlayUnit = string.Empty;
+    private string? _overlayHint;
+
+    [Parameter]
+    public int ChildId { get; set; }
+
+    /// <summary>可选的 URL 参数：?metrics=height,weight&amp;view=overlay&amp;kind=point，方便收藏/分享一组视图。</summary>
+    [SupplyParameterFromQuery(Name = "metrics")]
+    public string? MetricsQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = "view")]
+    public string? ViewQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = "kind")]
+    public string? KindQuery { get; set; }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        ApplyQueryOverrides();
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// URL 参数优先于内存里的偏好：这样别人发来一条链接，打开就是你看到的那组指标。
+    /// 只在参数存在时覆盖，缺省就沿用 <see cref="GrowthViewState"/> 里的选择。
+    /// </summary>
+    private void ApplyQueryOverrides()
+    {
+        if (!string.IsNullOrWhiteSpace(MetricsQuery))
+        {
+            var parsed = MetricsQuery
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(GrowthMetrics.FromKey)
+                .Where(m => m.HasValue)
+                .Select(m => m!.Value)
+                .ToHashSet();
+
+            if (parsed.Count > 0)
+            {
+                ViewState.Metrics = parsed;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(ViewQuery))
+        {
+            ViewState.Overlay = ViewQuery.Equals("overlay", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!string.IsNullOrWhiteSpace(KindQuery))
+        {
+            ViewState.KindFilter = KindQuery.ToLowerInvariant() switch
+            {
+                "point" => RecordKind.Point,
+                "period" => RecordKind.Period,
+                _ => null,
+            };
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        _child = await ChildService.FindAsync(ChildId, userId);
+        if (_child is null)
+        {
+            _loading = false;
+            return;
+        }
+
+        CurrentChild.Select(_child.Id);
+
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _ageText = AgeCalculator.Describe(_child.BirthDate, today);
+
+        // 这一页只画曲线，不再拉记录列表和最新数值摘要——那是「身体管理」页的事，
+        // 少两次查询，也少一份要跟着改的展示逻辑。
+        SyncCustomRangeFields();
+        await RebuildChartAsync(userId);
+        _loading = false;
+    }
+
+    private void SyncCustomRangeFields()
+    {
+        _customFrom = (ViewState.CustomFrom ?? DateOnly.FromDateTime(DateTime.Today).AddMonths(-3)).ToDateTimeValue();
+        _customTo = (ViewState.CustomTo ?? DateOnly.FromDateTime(DateTime.Today)).ToDateTimeValue();
+    }
+
+    private async Task RebuildChartAsync(string userId)
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+
+        DateOnly? from;
+        DateOnly? to = null;
+
+        if (ViewState.UseCustomRange)
+        {
+            from = ViewState.CustomFrom;
+            to = ViewState.CustomTo;
+
+            if (from is { } f && to is { } t && f > t)
+            {
+                (from, to) = (t, f);
+                ViewState.CustomFrom = from;
+                ViewState.CustomTo = to;
+            }
+        }
+        else
+        {
+            from = ViewState.RangeMonths is { } months ? today.AddMonths(-months) : null;
+        }
+
+        _chart = await GrowthService.BuildChartAsync(userId, ChildId, from, to, ViewState.KindFilter);
+
+        BuildOverlay();
+
+        var scope = ViewState.UseCustomRange
+            ? (from is { } cf && to is { } ct ? $"自定义 {cf:yyyy-MM-dd} ~ {ct:yyyy-MM-dd}" : "自定义区间")
+            : ViewState.RangeMonths is { } m ? $"近 {m} 个月" : "全部时间";
+
+        var kindText = ViewState.KindFilter switch
+        {
+            RecordKind.Point => "、只看单次记录",
+            RecordKind.Period => "、只看时段记录",
+            _ => string.Empty,
+        };
+
+        _chartDescription = $"{scope}{kindText}：{_chart.Points.Count} 个测量点";
+        _customFrom ??= today.AddMonths(-3).ToDateTimeValue();
+        _customTo ??= today.ToDateTimeValue();
+    }
+
+    /// <summary>按当前勾选拼出叠加图：日期取并集，缺失处线性插值。</summary>
+    private void BuildOverlay()
+    {
+        var series = new List<ChartAlign.Series>();
+        var titles = new List<string>();
+
+        foreach (var metric in SelectedMetricsInOrder())
+        {
+            var (labels, values) = _chart.Series(metric);
+            if (labels.Count == 0)
+            {
+                continue;
+            }
+
+            var unit = GrowthMetrics.Unit(metric);
+            var name = string.IsNullOrEmpty(unit)
+                ? GrowthMetrics.Title(metric)
+                : $"{GrowthMetrics.Title(metric)} ({unit})";
+
+            series.Add(new ChartAlign.Series(name, labels, values));
+            titles.Add(GrowthMetrics.Title(metric));
+        }
+
+        var aligned = ChartAlign.Align(series, ViewState.Normalize);
+
+        _overlayLabels = aligned.Labels.ToList();
+        _overlayLines = aligned.Values
+            .Select((values, index) => new ChartLine(aligned.SeriesNames[index], values))
+            .ToList();
+
+        var selected = SelectedMetricsInOrder().ToList();
+
+        _overlayTicks = !ViewState.Normalize && selected.Count == 1
+            ? GrowthMetrics.TickLabels(selected[0])?.ToArray()
+            : null;
+
+        _overlayTitle = titles.Count == 0 ? "指标对比" : string.Join(" / ", titles);
+        _overlayUnit = ViewState.Normalize ? "（0~100 相对值）" : string.Empty;
+        _overlayHint = ViewState.Normalize
+            ? "已归一化：每条线按自己的范围拉到 0~100，只比走势"
+            : "未归一化：量纲差别大的指标看着会比较扁，建议勾上「归一化」";
+    }
+
+    private List<GrowthMetric> SelectedMetricsInOrder() => [.. ViewState.EffectiveMetrics];
+
+    /// <summary>当前这份数据里**真的画得出来**的指标（按勾选顺序）。</summary>
+    private List<GrowthMetric> PlottedMetrics =>
+        [.. SelectedMetricsInOrder().Where(m => _chart.Series(m).Labels.Count > 0)];
+
+    /// <summary>当前这份数据里有值、但没被勾上的指标——用来告诉用户「有数据的其实是这几个」。</summary>
+    private List<GrowthMetric> AvailabilityMetrics =>
+        [.. GrowthMetrics.All.Where(m => _chart.Has(m) && !ViewState.EffectiveMetrics.Contains(m))];
+
+    /// <summary>一键把勾选换成「这一档里真有数据」的那些指标。</summary>
+    private void SelectAvailableMetrics()
+    {
+        var available = GrowthMetrics.All.Where(_chart.Has).ToList();
+        if (available.Count == 0)
+        {
+            return;
+        }
+
+        ViewState.Metrics = [.. available];
+        ApplyViewChange();
+    }
+
+    private void ApplyViewChange()
+    {
+        BuildOverlay();
+        _ = RefreshChartAsync();
+    }
+
+    private async Task RefreshChartAsync()
+    {
+        await RebuildChartAsync(await GetUserIdAsync());
+        StateHasChanged();
+    }
+
+    private void ToggleMetric(GrowthMetric metric)
+    {
+        var selected = ViewState.EffectiveMetrics.ToHashSet();
+
+        if (!selected.Remove(metric))
+        {
+            selected.Add(metric);
+        }
+
+        ViewState.Metrics = selected;
+        ApplyViewChange();
+    }
+
+    private void SetOverlay(bool overlay)
+    {
+        ViewState.Overlay = overlay;
+        ApplyViewChange();
+    }
+
+    private void SetNormalize(bool normalize)
+    {
+        ViewState.Normalize = normalize;
+        ApplyViewChange();
+    }
+
+    private void SetKindFilter(RecordKind? kind)
+    {
+        ViewState.KindFilter = kind;
+        ApplyViewChange();
+    }
+
+    private void SetRange(int? months)
+    {
+        ViewState.RangeMonths = months;
+        ViewState.UseCustomRange = false;
+        ApplyViewChange();
+    }
+
+    private void SetUseCustomRange(bool use)
+    {
+        ViewState.UseCustomRange = use;
+        SyncCustomRangeFields();
+        ApplyViewChange();
+    }
+
+    private void SetCustomFrom(DateTime? value)
+    {
+        _customFrom = value;
+        ViewState.CustomFrom = value.ToDateOnly();
+        ApplyViewChange();
+    }
+
+    private void SetCustomTo(DateTime? value)
+    {
+        _customTo = value;
+        ViewState.CustomTo = value.ToDateOnly();
+        ApplyViewChange();
+    }
+
+}

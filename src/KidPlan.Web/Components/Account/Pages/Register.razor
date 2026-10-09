@@ -1,0 +1,208 @@
+@page "/Account/Register"
+
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Identity
+@using KidPlan.Web.Data
+@using KidPlan.Web.Services
+
+@inject UserManager<ApplicationUser> UserManager
+@inject IUserStore<ApplicationUser> UserStore
+@inject SignInManager<ApplicationUser> SignInManager
+@inject IEmailSender<ApplicationUser> EmailSender
+@inject AccountLinkBuilder LinkBuilder
+@inject ILogger<Register> Logger
+@inject IdentityRedirectManager RedirectManager
+
+<PageTitle>注册 · KidPlan</PageTitle>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">🌱 KidPlan</div>
+        <p class="auth-sub">
+            @(RequireConfirmedAccount
+                ? "注册后需要去邮箱点一下确认链接"
+                : "注册一个账号，开始记录孩子的成长")
+        </p>
+
+        <StatusMessage Message="@Message" />
+
+        <EditForm Model="Input" method="post" OnValidSubmit="RegisterUser" FormName="register">
+            <DataAnnotationsValidator />
+            <ValidationSummary class="auth-validation-summary" role="alert" />
+
+            <div class="auth-field">
+                <label for="Input.DisplayName">你的称呼</label>
+                <InputText @bind-Value="Input.DisplayName"
+                           id="Input.DisplayName"
+                           class="auth-input"
+                           placeholder="例如：妈妈、爸爸、外婆" />
+                <ValidationMessage For="() => Input.DisplayName" class="auth-error" />
+            </div>
+
+            <div class="auth-field">
+                <label for="Input.Email">邮箱（同时作为登录名）</label>
+                <InputText @bind-Value="Input.Email"
+                           id="Input.Email"
+                           class="auth-input"
+                           autocomplete="username"
+                           placeholder="you@example.com" />
+                <ValidationMessage For="() => Input.Email" class="auth-error" />
+            </div>
+
+            <div class="auth-field">
+                <label for="Input.Password">密码</label>
+                <InputText type="password"
+                           @bind-Value="Input.Password"
+                           id="Input.Password"
+                           class="auth-input"
+                           autocomplete="new-password"
+                           placeholder="至少 6 位" />
+                <ValidationMessage For="() => Input.Password" class="auth-error" />
+            </div>
+
+            <div class="auth-field">
+                <label for="Input.ConfirmPassword">确认密码</label>
+                <InputText type="password"
+                           @bind-Value="Input.ConfirmPassword"
+                           id="Input.ConfirmPassword"
+                           class="auth-input"
+                           autocomplete="new-password"
+                           placeholder="再输入一次" />
+                <ValidationMessage For="() => Input.ConfirmPassword" class="auth-error" />
+            </div>
+
+            <button type="submit" class="auth-btn">
+                @(RequireConfirmedAccount ? "注册并发送确认邮件" : "注册并登录")
+            </button>
+        </EditForm>
+
+        @if (emailSendFailed)
+        {
+            @* 账号已经建好了，只是邮件没发出去。给一条明确的补救路径。 *@
+            <div class="auth-links">
+                <a href="@ResendUrl">重新发送确认邮件</a>
+            </div>
+        }
+
+        <div class="auth-links">
+            已经有账号了？
+            <a href="@LoginUrl">去登录</a>
+        </div>
+    </div>
+</div>
+
+@code {
+    private IEnumerable<IdentityError>? identityErrors;
+    private bool emailSendFailed;
+
+    [SupplyParameterFromForm]
+    private InputModel Input { get; set; } = default!;
+
+    [SupplyParameterFromQuery]
+    private string? ReturnUrl { get; set; }
+
+    private bool RequireConfirmedAccount => UserManager.Options.SignIn.RequireConfirmedAccount;
+
+    private string? Message => identityErrors is null
+        ? null
+        : $"注册失败：{string.Join("；", identityErrors.Select(e => e.Description))}";
+
+    private string ResendUrl =>
+        $"Account/ResendEmailConfirmation?email={Uri.EscapeDataString(Input.Email)}";
+
+    private string LoginUrl =>
+        string.IsNullOrEmpty(ReturnUrl)
+            ? "Account/Login"
+            : $"Account/Login?returnUrl={Uri.EscapeDataString(ReturnUrl)}";
+
+    protected override void OnInitialized()
+    {
+        Input ??= new();
+    }
+
+    private async Task RegisterUser()
+    {
+        emailSendFailed = false;
+
+        var user = new ApplicationUser
+        {
+            DisplayName = string.IsNullOrWhiteSpace(Input.DisplayName) ? null : Input.DisplayName.Trim(),
+            CreatedAt = DateTimeOffset.Now,
+        };
+
+        await UserStore.SetUserNameAsync(user, Input.Email, CancellationToken.None);
+
+        if (UserStore is not IUserEmailStore<ApplicationUser> emailStore)
+        {
+            throw new NotSupportedException("当前用户存储不支持邮箱，无法完成注册。");
+        }
+
+        await emailStore.SetEmailAsync(user, Input.Email, CancellationToken.None);
+
+        var result = await UserManager.CreateAsync(user, Input.Password);
+        if (!result.Succeeded)
+        {
+            identityErrors = result.Errors;
+            return;
+        }
+
+        Logger.LogInformation("新账号注册成功：{Email}", Input.Email);
+
+        // 要求邮箱确认时不发登录 Cookie：先发确认邮件，让用户去点链接再登录。
+        if (RequireConfirmedAccount)
+        {
+            var code = await UserManager.GenerateEmailConfirmationTokenAsync(user);
+            var link = LinkBuilder.Build("Account/ConfirmEmail", new Dictionary<string, object?>
+            {
+                ["userId"] = user.Id,
+                ["code"] = code,
+            });
+
+            try
+            {
+                await EmailSender.SendConfirmationLinkAsync(user, Input.Email, link);
+            }
+            catch (Exception ex)
+            {
+                // 这里必须说清楚“账号已创建、只是邮件没发出去”，
+                // 否则用户会以为注册失败而反复注册，然后撞上“邮箱已存在”。
+                Logger.LogError(ex, "注册后发送确认邮件失败：{Email}", Input.Email);
+                identityErrors =
+                [
+                    new IdentityError
+                    {
+                        Description = "账号已经创建成功，但确认邮件没能发出去。请点下面的「重新发送确认邮件」再试一次。",
+                    },
+                ];
+                emailSendFailed = true;
+                return;
+            }
+
+            RedirectManager.RedirectTo("Account/RegisterConfirmation", new() { ["email"] = Input.Email });
+            return;
+        }
+
+        await SignInManager.SignInAsync(user, isPersistent: true);
+        RedirectManager.RedirectTo(string.IsNullOrEmpty(ReturnUrl) ? "/children/new" : ReturnUrl);
+    }
+
+    private sealed class InputModel
+    {
+        [StringLength(30, ErrorMessage = "称呼最多 30 个字")]
+        [Display(Name = "称呼")]
+        public string? DisplayName { get; set; }
+
+        [Required(ErrorMessage = "请输入邮箱")]
+        [EmailAddress(ErrorMessage = "邮箱格式不正确")]
+        public string Email { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "请输入密码")]
+        [StringLength(100, ErrorMessage = "密码长度需要在 {2} 到 {1} 位之间", MinimumLength = 6)]
+        [DataType(DataType.Password)]
+        public string Password { get; set; } = string.Empty;
+
+        [DataType(DataType.Password)]
+        [Compare(nameof(Password), ErrorMessage = "两次输入的密码不一致")]
+        public string ConfirmPassword { get; set; } = string.Empty;
+    }
+}

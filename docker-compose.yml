@@ -1,0 +1,142 @@
+# =============================================================================
+# KidPlan 生产编排：MySQL 8 + Blazor Server 应用
+#
+# 使用方式：
+#   1) cp .env.example .env && 修改其中的密码
+#   2) docker compose up -d
+#   3) 宝塔 Nginx 反向代理到 127.0.0.1:${APP_PORT}
+#
+# 说明：
+#   - 不使用已废弃的 version: 键（Compose v2 会给出警告）。
+#   - app 端口只绑定到回环地址 127.0.0.1，公网流量必须经过宝塔 Nginx，
+#     这样 TLS/证书/防 CC 都由宝塔负责，容器不直接暴露。
+# =============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    # utf8mb4 保证中文与 emoji 都能存；0900_ai_ci 是 MySQL 8 的默认排序规则。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # 2C2G 小机器：InnoDB 缓冲池默认 128M 偏小、512M 又太占内存，
+      # 256M 是家庭自用规模下比较稳的折中值。内存更小(1G)请降到 128M。
+      - --innodb-buffer-pool-size=256M
+      # 单条 SQL 包上限（导入备份时不必再改）。
+      - --max-allowed-packet=64M
+    environment:
+      # 变量来自 .env；:? 表示缺失时直接报错退出，避免出现“空密码”数据库。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kidplan}
+      MYSQL_USER: ${MYSQL_USER:-kidplan}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - kidplan-mysql-data:/var/lib/mysql
+    healthcheck:
+      # 必须用 -h 127.0.0.1 走 TCP：socket 方式在初始化阶段会误报就绪。
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # 首次启动要初始化数据目录，给足 60s，避免误判 unhealthy 连锁阻塞 app。
+      start_period: 60s
+    # 不映射 3306 到公网：只有同一 compose 网络内的 app 能访问。
+    expose:
+      - "3306"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        # 等 mysql 健康检查通过再启动，应用自身的迁移重试是第二层保险。
+        condition: service_healthy
+    ports:
+      # 只绑定回环地址：宝塔 Nginx 反代 127.0.0.1:${APP_PORT} -> 容器 8080
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      TZ: ${TZ:-Asia/Shanghai}
+      # 双下划线 = 配置节分隔符，对应 appsettings.json 的 ConnectionStrings:DefaultConnection。
+      # Server=mysql 用的是 compose 服务名（容器 DNS）。
+      # SslMode=None / AllowPublicKeyRetrieval=True 是 MySqlConnector(Pomelo 底层驱动) 的合法关键字。
+      ConnectionStrings__DefaultConnection: "Server=mysql;Port=3306;Database=${MYSQL_DATABASE:-kidplan};User=${MYSQL_USER:-kidplan};Password=${MYSQL_PASSWORD};CharSet=utf8mb4;SslMode=None;AllowPublicKeyRetrieval=True;TreatTinyAsBoolean=true;ConnectionTimeout=30"
+      Database__MySqlVersion: "8.0.36"
+      Database__AutoMigrate: "true"
+      Database__RetryOnFailure: "true"
+      # 启动时迁移的最大重试次数（应用默认 10，首次启动 MySQL 初始化较慢时可调大）
+      Database__MigrateMaxAttempts: "10"
+      Identity__RequireConfirmedAccount: "true"
+      # 邮箱确认与重置密码都要发信。敏感值只从 .env 注入，
+      # 不要写进会被打进镜像的 appsettings.json。
+      # 这里对账号和授权码用 :? ：开了邮箱确认却没有 SMTP，等于谁也注册不进来，
+      # 宁可让 compose 在配置阶段就报错，也不要部署出一个坏掉的注册流程。
+      Smtp__Host: ${SMTP_HOST:-smtp.qq.com}
+      Smtp__Port: ${SMTP_PORT:-465}
+      Smtp__Security: ${SMTP_SECURITY:-SslOnConnect}
+      Smtp__UserName: ${SMTP_USERNAME:?请在 .env 中设置 SMTP_USERNAME}
+      Smtp__Password: ${SMTP_PASSWORD:?请在 .env 中设置 SMTP_PASSWORD}
+      Smtp__FromAddress: ${SMTP_FROM_ADDRESS:-}
+      # 邮件里链接用的对外地址，例如 https://kidplan.example.com。
+      # 建议填上：宝塔 Nginx 若没转发 X-Forwarded-Proto/Host，
+      # 确认/重置链接会变成 http://容器内网地址，用户点开是打不开的。
+      Smtp__PublicBaseUrl: ${PUBLIC_BASE_URL:-}
+      # TLS 由宝塔 Nginx 终结，容器内是明文 HTTP，所以不能开启 HTTPS 跳转。
+      HttpsRedirection__Enabled: "false"
+      # ---------------------------------------------------------------------
+      # 模型（AI）配置
+      #
+      # 全局配置放在宿主机的 ./config/ai.json，以读写方式挂进容器（见下面的 volumes）。
+      # 这么做的理由有三个：
+      #   1) 改完保存即生效，不需要重启容器（应用自己监听文件变更）；
+      #   2) 重建镜像 / 重新部署不会把配置冲掉；
+      #   3) 可以用宝塔文件管理器直接编辑，不必进容器。
+      # 不设置这一项也能跑：应用默认就找「内容根目录/config/ai.json」，即 /app/config/ai.json。
+      # 这里显式写出来，是为了让「配置到底在哪个文件」这件事在编排文件里一眼可见。
+      # ---------------------------------------------------------------------
+      Ai__ConfigFile: "/app/config/ai.json"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:8080/healthz || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 启动阶段要跑 EF Core 迁移，放宽到 90s。
+      start_period: 90s
+    volumes:
+      # DataProtection 密钥（Identity 的认证 Cookie 与令牌用它加密）。
+      # 挂到 kidplan 用户家目录下的 .aspnet：不挂的话密钥随容器重建丢失，
+      # 所有已登录用户会被强制登出（详见 docs/DEPLOY.md）。
+      - kidplan-dataprotection-keys:/home/kidplan/.aspnet
+      # 模型（AI）全局配置：宿主机 ./config ↔ 容器 /app/config。
+      # 用绑定挂载而不是具名卷，是为了能在宝塔文件管理器里直接改 ai.json。
+      # ⚠️ 容器以 uid 64198（kidplan）运行，宿主机上的 ./config 必须属于这个 uid，
+      #    否则「保存配置」会失败（页面上会显示「配置文件不可写」）。
+      #    首次部署执行一次即可：sudo chown -R 64198:64198 ./config
+      #    deploy/deploy.sh 会在启动前自动帮你做好这一步。
+      - ./config:/app/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # 具名卷：docker compose down 不会删，只有 down -v 或手动删卷才会清空数据。
+  kidplan-mysql-data:
+  # DataProtection 密钥卷：同样只有 down -v 或手动删卷才会清空。
+  # 删掉它不会有数据损失，但所有用户的登录状态会失效（需要重新登录）。
+  kidplan-dataprotection-keys:

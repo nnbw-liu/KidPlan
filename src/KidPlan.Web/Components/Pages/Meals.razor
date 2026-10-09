@@ -1,0 +1,1367 @@
+@page "/children/{ChildId:int}/meals"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject IMealService MealService
+@inject ISnackbar Snackbar
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+@inject KidPlan.Web.Services.Ai.IAiSettingsStore AiSettings
+@inject KidPlan.Web.Services.Ai.IMealRecommendationService Recommender
+
+<PageTitle>饮食安排 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_child is null)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    @* ---------------- 头部 ---------------- *@
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <span style="font-size:2rem;line-height:1">@(_child.AvatarEmoji ?? Ui.GenderEmoji(_child.Gender))</span>
+        <MudText Typo="Typo.h5">@_child.Alias 的饮食安排</MudText>
+        <MudSpacer />
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.History"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meal-history"))">
+            餐饮记录
+        </MudButton>
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.MonitorHeart"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/body"))">
+            身体管理
+        </MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+        @_ageText · 系统当前时间 @_nowText
+    </MudText>
+
+    @* ---------------- 过敏原（分级） ---------------- *@
+    @if (_foodAllergens.Count > 0)
+    {
+        var worst = _foodAllergens.Max(a => a.Severity);
+        <MudAlert Severity="@Ui.AllergyAlertSeverity(worst)" Variant="Variant.Outlined" Dense="true" Class="mb-4">
+            <div>
+                这个小孩登记了 @_foodAllergens.Count 项食物过敏原：
+                @foreach (var allergen in _foodAllergens)
+                {
+                    <span>@Ui.AllergyIcon(allergen.Severity) @allergen.Name（@allergen.Severity.ToChinese()）　</span>
+                }
+            </div>
+            <div class="text-muted-sm" style="margin-top:4px">
+                安排时按等级处理：@AllergyPolicyHint
+                <a href="@($"/children/{ChildId}/allergens")">调整等级</a>
+            </div>
+        </MudAlert>
+    }
+    else
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mb-4">
+            还没有登记食物过敏原。建议先到
+            <a href="@($"/children/{ChildId}/allergens")">过敏原管理</a>
+            里登记并分级，这样才能自动检查菜单是否安全，AI 推荐也才知道要回避什么。
+        </MudAlert>
+    }
+
+    @* ---------------- 日期切换 ---------------- *@
+    <MudPaper Elevation="0" Class="pa-3 mb-4">
+        <div class="d-flex align-center flex-wrap gap-2">
+            <MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" title="前一天" OnClick="@(() => ShiftDayAsync(-1))" />
+            <MudDatePicker Date="_date" DateChanged="OnDateChanged" Label="查看日期" Variant="Variant.Outlined"
+                           DateFormat="yyyy-MM-dd" />
+            <MudIconButton Icon="@Icons.Material.Filled.ChevronRight" title="后一天" OnClick="@(() => ShiftDayAsync(1))" />
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => JumpToTodayAsync())">回到今天</MudButton>
+            <MudSpacer />
+            <MudButton Size="Size.Small"
+                       Variant="Variant.Text"
+                       StartIcon="@Icons.Material.Filled.Refresh"
+                       OnClick="RefreshAsync">
+                刷新状态
+            </MudButton>
+        </div>
+    </MudPaper>
+
+    @* ---------------- 当天汇总 ---------------- *@
+    <MudPaper Elevation="1" Class="pa-4 mb-4">
+        <div class="d-flex flex-wrap gap-4 align-center">
+            <div>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">固定三餐</MudText>
+                <MudText Typo="Typo.h5">@_summary.FixedEatenCount / @_summary.FixedMealCount 餐</MudText>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">
+                    早/午/晚，一天各一顿
+                </MudText>
+            </div>
+            <div>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">点心 / 零食</MudText>
+                <MudText Typo="Typo.h5">@_summary.AdHocEatenCount / @_summary.AdHocMealCount 顿</MudText>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">不定时，想吃就记</MudText>
+            </div>
+            <div>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">过饭点待确认</MudText>
+                <MudText Typo="Typo.h5" Style="@(_summary.OverdueCount > 0 ? "color:#b3252a" : null)">
+                    @_summary.OverdueCount 餐
+                </MudText>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">只算定了饭点的那几顿</MudText>
+            </div>
+            <div>
+                <MudText Typo="Typo.caption" Class="text-muted-sm">预计热量</MudText>
+                <MudText Typo="Typo.h5">@_summary.EatenCalories / @_summary.PlannedCalories 千卡</MudText>
+            </div>
+            @if (_summary.TotalCount > 0)
+            {
+                <div style="flex:1;min-width:160px">
+                    <MudProgressLinear Color="Color.Success"
+                                       Value="@(_summary.TotalCount == 0 ? 0 : _summary.EatenCount * 100 / _summary.TotalCount)"
+                                       Class="mt-2" />
+                </div>
+            }
+        </div>
+    </MudPaper>
+
+    @* ---------------- 操作按钮 ---------------- *@
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   StartIcon="@Icons.Material.Filled.Add"
+                   OnClick="ToggleFormAsync">
+            @(_showForm ? "收起" : "安排一餐")
+        </MudButton>
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Secondary"
+                   StartIcon="@Icons.Material.Filled.Cookie"
+                   OnClick="@(() => QuickAddAsync(MealType.Snack))">
+            ＋ 记一顿点心
+        </MudButton>
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Secondary"
+                   StartIcon="@Icons.Material.Filled.Icecream"
+                   OnClick="@(() => QuickAddAsync(MealType.Treat))">
+            ＋ 记一顿零食
+        </MudButton>
+        <MudSpacer />
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Tertiary"
+                   StartIcon="@Icons.Material.Filled.AutoAwesome"
+                   OnClick="ToggleAiPanel">
+            @(_showAi ? "收起 AI 推荐" : "AI 饮食推荐")
+        </MudButton>
+    </div>
+
+    @* ---------------- AI 饮食推荐 ---------------- *@
+    @if (_showAi)
+    {
+        <MudPaper Elevation="2" Class="pa-4 pa-md-6 mb-4">
+            <div class="d-flex align-center flex-wrap gap-2">
+                <MudText Typo="Typo.h6">🤖 AI 饮食推荐</MudText>
+                <MudSpacer />
+                @if (_aiProviders.Count == 0)
+                {
+                    <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
+                               OnClick="@(() => NavigationManager.NavigateTo("/settings/ai"))">
+                        去配置模型
+                    </MudButton>
+                }
+            </div>
+
+            @if (_aiProviders.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mt-3">
+                    还没有配置任何模型端点。请先到
+                    <a href="/settings/ai">模型设置</a>
+                    里加一个 OpenAI 兼容的接口（本机跑 LM Studio / Ollama 也可以，用「本地中继」就能从云端连回家里）。
+                </MudAlert>
+            }
+            else
+            {
+                <MudText Typo="Typo.body2" Class="text-muted-sm mt-2 mb-3">
+                    会把这之前 N 天的饮食、身体情况和过敏原一起发给模型，让它给出可执行的菜单。
+                    生成结果还会再做一次本地过敏检查，含强过敏 / 过敏性休克食材的菜不会让你写入。
+                </MudText>
+
+                <MudGrid>
+                    <MudItem xs="12" md="3">
+                        <MudSelect T="MealRecommendationScope" @bind-Value="_aiScope" Label="推荐粒度"
+                                   Variant="Variant.Outlined">
+                            <MudSelectItem T="MealRecommendationScope" Value="MealRecommendationScope.Meal">单餐</MudSelectItem>
+                            <MudSelectItem T="MealRecommendationScope" Value="MealRecommendationScope.Day">单天</MudSelectItem>
+                            <MudSelectItem T="MealRecommendationScope" Value="MealRecommendationScope.Week">单周（7 天）</MudSelectItem>
+                        </MudSelect>
+                    </MudItem>
+
+                    @if (_aiScope == MealRecommendationScope.Meal)
+                    {
+                        <MudItem xs="12" md="3">
+                            <MudSelect T="MealType" @bind-Value="_aiMealType" Label="哪一餐" Variant="Variant.Outlined">
+                                @foreach (var type in EnumDisplay.MealTypeOrder)
+                                {
+                                    <MudSelectItem T="MealType" Value="type">@type.ToChinese()</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                    }
+
+                    <MudItem xs="12" md="3">
+                        <MudSelect T="string" Value="_aiProviderId" ValueChanged="SetAiProvider"
+                                   Label="模型端点" Variant="Variant.Outlined">
+                            @foreach (var provider in _aiProviders)
+                            {
+                                <MudSelectItem T="string" Value="provider.Id">@provider.Name</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+
+                    <MudItem xs="12" md="3">
+                        <MudSelect T="string" Value="_aiModel" ValueChanged="@(v => _aiModel = v)"
+                                   Label="模型" Variant="Variant.Outlined"
+                                   HelperText="列表里没有的可以直接手输（先点开下拉再打字）">
+                            @foreach (var model in _aiModels)
+                            {
+                                <MudSelectItem T="string" Value="model">@model</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudTextField T="string" @bind-Value="_aiModel" Label="或手工输入模型名"
+                                      Variant="Variant.Outlined" Margin="Margin.Dense" Class="mt-2"
+                                      Placeholder="例如：qwen2.5-7b-instruct" />
+                    </MudItem>
+
+                    <MudItem xs="12" md="6">
+                        <MudText Typo="Typo.body2">
+                            前置周期：<strong>@_aiLookback 天</strong>
+                            <span class="text-muted-sm">（最多 @_aiMaxLookback 天）</span>
+                        </MudText>
+                        <MudSlider T="int" Value="_aiLookback" ValueChanged="@(v => _aiLookback = v)"
+                                   Min="1" Max="_aiMaxLookback" Step="1" Color="Color.Primary" />
+                        <MudNumericField T="int" @bind-Value="_aiLookback" Label="前置周期（天）"
+                                         Variant="Variant.Outlined" Margin="Margin.Dense"
+                                         Min="1" Max="_aiMaxLookback" Style="max-width:200px" />
+                    </MudItem>
+
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" @bind-Value="_aiExtra" Label="额外要求（可选）"
+                                      Variant="Variant.Outlined" Lines="2"
+                                      Placeholder="例如：这周想吃鱼、不要辣、中午在幼儿园吃"
+                                      MaxLength="500" />
+                        <MudCheckBox T="bool" @bind-Value="_aiIncludeAdHoc" Color="Color.Primary"
+                                     Label="同时安排点心 / 零食" />
+                    </MudItem>
+                </MudGrid>
+
+                <div class="d-flex flex-wrap gap-2 mt-2 align-center">
+                    <MudButton Variant="Variant.Filled" Color="Color.Tertiary" Disabled="_aiBusy"
+                               StartIcon="@Icons.Material.Filled.AutoAwesome" OnClick="GenerateAsync">
+                        @(_aiBusy ? "正在让模型思考…" : "生成推荐")
+                    </MudButton>
+                    <MudButton Variant="Variant.Text" Disabled="_aiBusy" OnClick="PreviewPromptAsync">
+                        看看会发什么给模型
+                    </MudButton>
+                    @if (_aiResult is not null && _aiResult.Suggestions.Count > 0)
+                    {
+                        <MudButton Variant="Variant.Outlined" Color="Color.Primary" Disabled="_aiBusy"
+                                   StartIcon="@Icons.Material.Filled.PlaylistAdd"
+                                   OnClick="ImportAllAsync">
+                            全部写入饮食安排
+                        </MudButton>
+                    }
+                </div>
+
+                @if (_aiBusy)
+                {
+                    <MudProgressLinear Indeterminate="true" Color="Color.Tertiary" Class="mt-3" />
+                }
+
+                @if (_aiError is not null)
+                {
+                    <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mt-3">
+                        <div>@_aiError</div>
+                        @* 「额度不够」这类错误是配置问题，不是模型不行：给一个直接过去的入口，
+                           省得用户在一堆设置里找「最大输出 token」在哪。 *@
+                        @if (IsTokenBudgetProblem)
+                        {
+                            <div class="mt-2">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
+                                           StartIcon="@Icons.Material.Filled.Settings"
+                                           OnClick="@(() => NavigationManager.NavigateTo("/settings/ai"))">
+                                    去模型设置调大「最大输出 token」
+                                </MudButton>
+                                @if (_aiScope == MealRecommendationScope.Week)
+                                {
+                                    <MudButton Size="Size.Small" Variant="Variant.Text" Class="ml-2"
+                                               OnClick="@(() => _aiScope = MealRecommendationScope.Day)">
+                                        改成只推荐单天
+                                    </MudButton>
+                                }
+                            </div>
+                        }
+                    </MudAlert>
+                }
+
+                @if (_aiResult is not null)
+                {
+                    <MudDivider Class="my-4" />
+
+                    @if (_aiResult.Success)
+                    {
+                        <MudText Typo="Typo.subtitle2" Class="mb-1">
+                            @_aiResult.ProviderName · @_aiResult.Model 给出的建议
+                        </MudText>
+                        @if (!string.IsNullOrWhiteSpace(_aiResult.Summary))
+                        {
+                            <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">@_aiResult.Summary</MudText>
+                        }
+
+                        @foreach (var suggestion in _aiResult.Suggestions)
+                        {
+                            <MudPaper Elevation="1" Class="pa-3 mb-2">
+                                <div class="d-flex align-center flex-wrap gap-2">
+                                    <MudText Typo="Typo.body2">
+                                        @suggestion.Date.ToString("MM-dd") · @Ui.MealTypeEmoji(suggestion.MealType)
+                                        @suggestion.MealType.ToChinese()
+                                        · @(suggestion.Time?.ToString("HH:mm") ?? "未定时点")
+                                    </MudText>
+                                    @if (suggestion.EstimatedCalories is { } calories)
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">@calories 千卡</MudChip>
+                                    }
+                                    @if (suggestion.HasAllergen)
+                                    {
+                                        <MudChip T="string" Size="Size.Small"
+                                                 Color="@Ui.AllergyColor(suggestion.MaxSeverity ?? AllergySeverity.Moderate)"
+                                                 Variant="Variant.Filled">
+                                            @Ui.AllergyIcon(suggestion.MaxSeverity ?? AllergySeverity.Moderate)
+                                            含 @string.Join("、", suggestion.AllergenMatches.Select(m => m.Allergen))
+                                        </MudChip>
+                                    }
+                                    <MudSpacer />
+                                    <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary"
+                                               StartIcon="@Icons.Material.Filled.PlaylistAdd"
+                                               OnClick="@(() => ImportOneAsync(suggestion))">
+                                        写入
+                                    </MudButton>
+                                </div>
+                                <MudText Typo="Typo.body1">@suggestion.Menu</MudText>
+                                @if (!string.IsNullOrWhiteSpace(suggestion.Foods))
+                                {
+                                    <MudText Typo="Typo.caption" Class="text-muted-sm">食材：@suggestion.Foods</MudText>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(suggestion.Reason))
+                                {
+                                    <MudText Typo="Typo.caption" Class="text-muted-sm">理由：@suggestion.Reason</MudText>
+                                }
+                            </MudPaper>
+                        }
+                    }
+
+                    @if (_aiResult.HasBlocked)
+                    {
+                        <MudAlert Severity="Severity.Error" Variant="Variant.Filled" Class="mt-3">
+                            <strong>🚫 有 @_aiResult.Blocked.Count 条被本地过敏检查拦下了，不会写入</strong>
+                            <div style="margin-top:4px">
+                                @foreach (var blocked in _aiResult.Blocked)
+                                {
+                                    <div class="text-muted-sm">
+                                        · @blocked.Date.ToString("MM-dd") @blocked.MealType.ToChinese()「@blocked.Menu」
+                                        —— @blocked.BlockReason
+                                    </div>
+                                }
+                            </div>
+                            <div class="text-muted-sm" style="margin-top:4px">
+                                模型说没说不重要，过敏原一律以你登记的数据为准。
+                            </div>
+                        </MudAlert>
+                    }
+
+                    @if (!_aiResult.Success && !string.IsNullOrWhiteSpace(_aiResult.RawResponse))
+                    {
+                        @* 这里显示的是**整理过的诊断**（finish_reason / token 用量 / 正文或推理开头），
+                           不是原始 HTTP 报文：推理模型把额度用光时，原始报文里是一整包英文思考链，
+                           铺在页面上只会让人以为「输出内容不对」。原始报文在服务端日志里。 *@
+                        <MudText Typo="Typo.caption" Class="text-muted-sm mb-1">
+                            这次调用的诊断（原始报文已记进服务端日志）：
+                        </MudText>
+                        <MudPaper Elevation="0" Class="pa-3"
+                                  Style="max-height:260px;overflow:auto;white-space:pre-wrap;font-size:0.8rem">
+                            @_aiResult.RawResponse
+                        </MudPaper>
+                    }
+
+                    @if (_showPrompt)
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm mt-3 mb-1">实际发给模型的提示词：</MudText>
+                        <MudPaper Elevation="0" Class="pa-3"
+                                  Style="max-height:300px;overflow:auto;white-space:pre-wrap;font-size:0.78rem">
+                            @_promptPreview
+                        </MudPaper>
+                    }
+                }
+            }
+        </MudPaper>
+    }
+
+    @* ---------------- 新增安排 ---------------- *@
+    @if (_showForm)
+    {
+        <MudPaper Elevation="1" Class="pa-4 pa-md-6 mb-4">
+            <MudText Typo="Typo.h6" Class="mb-3">@(_editingId is null ? "新增饮食安排" : "修改这餐安排")</MudText>
+
+            @if (_formMessage is not null)
+            {
+                <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Dense="true" Class="mb-3">@_formMessage</MudAlert>
+            }
+
+            <MudGrid>
+                <MudItem xs="12" md="3">
+                    @* 这里必须是「返回 Task 的异步回调」，不能是 `void 方法里 _ = 异步方法()`。
+                       原因见 OnMealTypeChangedAsync 的注释：火忘掉的异步任务改完成之后，
+                       Blazor 不会因为它再渲染一次，界面上就会看到「上一个餐次」的饭点。 *@
+                    <MudSelect T="MealType" Value="_formMealType"
+                               ValueChanged="@((MealType type) => OnMealTypeChangedAsync(type))"
+                               Label="餐次" Variant="Variant.Outlined"
+                               HelperText="早/午/晚是固定三餐，点心零食可以多顿">
+                        @foreach (var type in EnumDisplay.MealTypeOrder)
+                        {
+                            <MudSelectItem T="MealType" Value="type">@Ui.MealTypeEmoji(type) @type.ToChinese()</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+
+                <MudItem xs="12" md="3">
+                    <MudTimePicker @bind-Time="_formTime" Label="计划饭点" Variant="Variant.Outlined"
+                                   TimeFormat="HH:mm"
+                                   HelperText="@(_formMealType.IsFixedMeal()
+                                       ? "系统按这个时间和当前时间判断状态"
+                                       : "点心 / 零食可以留空表示不定时")" />
+                    @if (!_formMealType.IsFixedMeal())
+                    {
+                        <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _formTime = null)">
+                            清空饭点（不定时）
+                        </MudButton>
+                    }
+                </MudItem>
+
+                <MudItem xs="12" md="6">
+                    <MudTextField T="string" @bind-Value="_formMenu" @bind-Value:after="RecheckAllergy"
+                                  Label="这一餐吃什么 *"
+                                  Variant="Variant.Outlined"
+                                  Placeholder="例如：小米粥 + 蒸蛋 + 西兰花"
+                                  HelperText="会跟食物过敏原做比对"
+                                  MaxLength="500"
+                                  Immediate="true" />
+                </MudItem>
+
+                <MudItem xs="12" md="8">
+                    <MudTextField T="string" @bind-Value="_formFoods" @bind-Value:after="RecheckAllergy"
+                                  Label="涉及的食材"
+                                  Variant="Variant.Outlined"
+                                  Placeholder="例如：小米、鸡蛋、西兰花"
+                                  HelperText="用逗号分隔，过敏检查会一起看这里"
+                                  MaxLength="500"
+                                  Immediate="true" />
+                </MudItem>
+
+                <MudItem xs="12" md="4">
+                    <MudNumericField T="int?" @bind-Value="_formCalories" Label="预计热量 (千卡)"
+                                     Variant="Variant.Outlined" Min="0" Max="10000" Step="10" />
+                </MudItem>
+
+                <MudItem xs="12">
+                    <MudTextField T="string" @bind-Value="_formNotes" Label="备注" Variant="Variant.Outlined"
+                                  Placeholder="例如：今天在幼儿园吃、需要带饭" MaxLength="1000" />
+                </MudItem>
+            </MudGrid>
+
+            @* 实时过敏提示：输入菜单 / 食材时立刻比对，不用等保存。
+               等级决定它可以拦到什么程度，所以文案也按等级分三档。 *@
+            @if (_formAllergyMatches.Count > 0)
+            {
+                var worst = _formAllergyMatches.Max(m => m.Severity);
+                var action = worst.ToRiskAction();
+
+                <MudAlert Severity="@Ui.AllergyAlertSeverity(worst)" Variant="Variant.Filled" Class="mt-2">
+                    <strong>
+                        @Ui.AllergyIcon(worst) 命中@(worst.ToChinese())级过敏原
+                        @(action == AllergyRiskAction.Notice ? "（仅提示，不拦保存）" : "（需要你确认才能保存）")
+                    </strong>
+                    <div style="margin-top:4px">
+                        @foreach (var match in _formAllergyMatches)
+                        {
+                            <div>· 「@match.Allergen」（@match.Severity.ToChinese()）——菜单里出现了「@match.MatchedKeyword」</div>
+                        }
+                    </div>
+
+                    @if (action != AllergyRiskAction.Notice)
+                    {
+                        <MudCheckBox T="bool" @bind-Value="_formAllergyAck" Class="mt-2"
+                                     Color="@(action == AllergyRiskAction.DoubleConfirm ? Color.Error : Color.Warning)"
+                                     Label="我知道有风险，仍然要这样安排" />
+                    }
+
+                    @if (action == AllergyRiskAction.DoubleConfirm)
+                    {
+                        <MudText Typo="Typo.caption" Style="margin-top:4px">
+                            这一条的等级是「@worst.ToChinese()」，光勾选还不够——请再点一次下面的按钮，
+                            确认你确实看到了这条警告。
+                        </MudText>
+                        <div class="d-flex flex-wrap gap-2 align-center mt-2">
+                            <MudButton Size="Size.Small"
+                                       Variant="@(_formAllergyDoubleConfirmed ? Variant.Filled : Variant.Outlined)"
+                                       Color="Color.Error"
+                                       Disabled="!_formAllergyAck || _formAllergyDoubleConfirmed"
+                                       StartIcon="@Icons.Material.Filled.Warning"
+                                       OnClick="@(() => _formAllergyDoubleConfirmed = true)">
+                                @(_formAllergyDoubleConfirmed ? "已二次确认" : "我确认，仍然安排这一餐")
+                            </MudButton>
+                            @if (_formAllergyDoubleConfirmed)
+                            {
+                                <MudText Typo="Typo.caption" Style="color:#1d7a52">已确认，可以保存了。</MudText>
+                            }
+                        </div>
+                    }
+                </MudAlert>
+            }
+
+            <MudDivider Class="my-4" />
+
+            <div class="d-flex flex-wrap gap-2">
+                <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                           Disabled="@(_saving || !CanSaveForm)"
+                           StartIcon="@Icons.Material.Filled.Save" OnClick="SaveMealAsync">
+                    @(_editingId is null ? "保存安排" : "保存修改")
+                </MudButton>
+                <MudButton Variant="Variant.Text" OnClick="ResetFormAsync">清空</MudButton>
+                @if (!CanSaveForm)
+                {
+                    <MudText Typo="Typo.caption" Style="color:#b3252a;align-self:center">
+                        命中了需要确认的过敏原，请先勾选（强过敏还要点一次二次确认）。
+                    </MudText>
+                }
+            </div>
+        </MudPaper>
+    }
+
+    @* ---------------- 当天餐次列表 ---------------- *@
+    @if (_summary.Meals.Count == 0)
+    {
+        <MudPaper Elevation="0" Class="pa-8 text-center">
+            <MudText Typo="Typo.body1" Class="mb-1">@(_date?.ToString("yyyy-MM-dd")) 还没有安排</MudText>
+            <MudText Typo="Typo.body2" Class="text-muted-sm">点上面的「安排一餐」开始记录吧。</MudText>
+        </MudPaper>
+    }
+    else
+    {
+        @* 固定三餐和加餐刻意分成两段：三餐是「必须安排」的，点心零食是「想吃就记」的，
+           混在一起会让人误以为一天非得吃满五六顿。 *@
+        foreach (var (title, hint, items) in new[]
+        {
+            ("固定三餐", "早餐 / 午餐 / 晚餐，一天各一顿", _summary.FixedMeals),
+            ("点心 · 零食", "不定时，可以任意多顿", _summary.AdHocMeals),
+        })
+        {
+            if (items.Count == 0)
+            {
+                continue;
+            }
+
+            <MudText Typo="Typo.subtitle2" Class="mt-4 mb-1">
+                @title <span class="text-muted-sm">· @hint</span>
+            </MudText>
+
+            @foreach (var item in items)
+            {
+                var meal = item.Meal;
+                <MudPaper Elevation="1" Class="pa-4 mb-3">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <span style="font-size:1.5rem">@Ui.MealTypeEmoji(meal.MealType)</span>
+                        <div>
+                            <MudText Typo="Typo.subtitle1">
+                                @meal.MealType.ToChinese() ·
+                                @(meal.PlannedTime is { } planned ? $"计划 {planned:HH:mm}" : "未定时点")
+                            </MudText>
+                            <MudText Typo="Typo.caption" Class="text-muted-sm">@item.StateText</MudText>
+                        </div>
+                        <MudSpacer />
+                        @if (meal.CreatedFromAiSuggestion)
+                        {
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">AI 推荐</MudChip>
+                        }
+                        <MudChip T="string"
+                                 Size="Size.Small"
+                                 Color="@Ui.MealStateColor(item.State)"
+                                 Variant="@Ui.MealStateVariant(item.State)">
+                            @item.State.ToChinese()
+                        </MudChip>
+                    </div>
+
+                    <MudDivider Class="my-3" />
+
+                    <MudText Typo="Typo.body1">@meal.Menu</MudText>
+
+                    @if (!string.IsNullOrWhiteSpace(meal.Foods))
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">食材：@meal.Foods</MudText>
+                    }
+
+                    @if (meal.EstimatedCalories is { } calories)
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">预计 @calories 千卡</MudText>
+                    }
+
+                    @if (!string.IsNullOrWhiteSpace(meal.Notes))
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">备注：@meal.Notes</MudText>
+                    }
+
+                    @if (item.PendingRiskMatches.Count > 0)
+                    {
+                        <MudAlert Severity="@Ui.AllergyAlertSeverity(item.MaxSeverity ?? AllergySeverity.Moderate)"
+                                  Variant="Variant.Outlined" Dense="true" Class="mt-2">
+                            @Ui.AllergyIcon(item.MaxSeverity ?? AllergySeverity.Moderate) 可能含过敏食物：
+                            @string.Join("、", item.PendingRiskMatches.Select(m => $"{m.Allergen}（{m.Severity.ToChinese()}，命中「{m.MatchedKeyword}」）"))
+                            <div class="text-muted-sm">安排时还没有确认过风险，请核实。</div>
+                        </MudAlert>
+                    }
+                    else if (item.ContainsAllergen)
+                    {
+                        <MudAlert Severity="@(item.HasCriticalAllergen ? Severity.Warning : Severity.Normal)"
+                                  Variant="Variant.Text" Dense="true" Class="mt-2">
+                            @Ui.AllergyIcon(item.MaxSeverity ?? AllergySeverity.Mild) 含：
+                            @string.Join("、", item.AllergenMatches.Select(m => $"{m.Allergen}（{m.Severity.ToChinese()}）"))
+                            @if (meal.AllergyWarningAcknowledged)
+                            {
+                                <span>· 安排时已确认风险</span>
+                            }
+                            @if (item.IsAllergenEscalated)
+                            {
+                                <div style="color:#b3252a">
+                                    ⚠️ 这条过敏原的等级后来被调高了（安排时是
+                                    @meal.AllergyAcknowledgedMaxSeverity?.ToChinese()，现在是
+                                    @item.MaxSeverity?.ToChinese()），建议重新确认这顿安排。
+                                </div>
+                            }
+                        </MudAlert>
+                    }
+
+                    @if (meal.Status == MealStatus.Eaten)
+                    {
+                        <MudAlert Severity="Severity.Success" Variant="Variant.Text" Dense="true" Class="mt-2">
+                            已吃完 @(meal.EatenAt is { } at ? $"— 确认时间 {at.LocalDateTime:MM-dd HH:mm}" : "")
+                            @if (meal.Appetite != AppetiteLevel.Unknown)
+                            {
+                                @($"· 食欲{meal.Appetite.ToChinese()}")
+                            }
+                            @if (!string.IsNullOrWhiteSpace(meal.FinishNote))
+                            {
+                                <div class="text-muted-sm">@meal.FinishNote</div>
+                            }
+                        </MudAlert>
+                    }
+
+                    @* 确认吃完的小表单 *@
+                    @if (_eatingId == meal.Id)
+                    {
+                        <MudPaper Elevation="0" Class="pa-3 mt-3" Style="background:#f2f7f4">
+                            <MudText Typo="Typo.subtitle2" Class="mb-2">确认这一餐吃完了</MudText>
+                            <MudGrid>
+                                <MudItem xs="12" md="6">
+                                    <MudTextField T="string" @bind-Value="_finishNote" Label="吃完情况"
+                                                  Variant="Variant.Outlined"
+                                                  Placeholder="例如：吃了一碗，蔬菜剩了一半"
+                                                  MaxLength="500" />
+                                </MudItem>
+                                <MudItem xs="12" md="6">
+                                    <MudSelect T="AppetiteLevel" @bind-Value="_finishAppetite" Label="这一餐的食欲"
+                                               Variant="Variant.Outlined">
+                                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Unknown">未记录</MudSelectItem>
+                                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Poor">很差</MudSelectItem>
+                                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Fair">一般</MudSelectItem>
+                                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Good">不错</MudSelectItem>
+                                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Excellent">很好</MudSelectItem>
+                                    </MudSelect>
+                                </MudItem>
+                            </MudGrid>
+                            <div class="d-flex flex-wrap gap-2 mt-2">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Success"
+                                           StartIcon="@Icons.Material.Filled.Check" OnClick="@(() => MarkEatenAsync(meal))">
+                                    确认已吃完
+                                </MudButton>
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _eatingId = null)">
+                                    取消
+                                </MudButton>
+                            </div>
+                        </MudPaper>
+                    }
+
+                    @* 删除确认 *@
+                    @if (_pendingDeleteId == meal.Id)
+                    {
+                        <div class="d-flex align-center gap-2 mt-3">
+                            <MudText Typo="Typo.body2" Style="color:#b3252a">确定删除这餐安排吗？</MudText>
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Error"
+                                       OnClick="@(() => DeleteMealAsync(meal))">
+                                确认删除
+                            </MudButton>
+                            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _pendingDeleteId = null)">
+                                取消
+                            </MudButton>
+                        </div>
+                    }
+
+                    <div class="d-flex flex-wrap gap-1 mt-3">
+                        @if (meal.Status != MealStatus.Eaten)
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Success"
+                                       StartIcon="@Icons.Material.Filled.Check"
+                                       OnClick="@(() => BeginEat(meal))">
+                                确认吃完
+                            </MudButton>
+                        }
+                        else
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default"
+                                       StartIcon="@Icons.Material.Filled.Undo" OnClick="@(() => ReopenAsync(meal))">
+                                撤销确认
+                            </MudButton>
+                        }
+
+                        @if (meal.Status == MealStatus.Planned)
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Default"
+                                       StartIcon="@Icons.Material.Filled.Block" OnClick="@(() => SkipAsync(meal))">
+                                这餐不吃了
+                            </MudButton>
+                        }
+
+                        <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.Edit" OnClick="@(() => BeginEdit(meal))">
+                            修改
+                        </MudButton>
+                        <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error"
+                                   StartIcon="@Icons.Material.Filled.Delete" OnClick="@(() => _pendingDeleteId = meal.Id)">
+                            删除
+                        </MudButton>
+                    </div>
+                </MudPaper>
+            }
+        }
+
+        <MudText Typo="Typo.caption" Class="text-muted-sm mt-2">
+            「未到饭点 / 用餐中 / 已过饭点」都是系统根据当前时间自动算出来的，
+            不需要手工维护；只有「已吃完」和「已跳过」需要你点一下确认。
+            没填饭点的点心 / 零食不做时间推算，也就不会变成「已过饭点待确认」。
+        </MudText>
+    }
+}
+
+@code {
+    private bool _loading = true;
+    private bool _saving;
+    private Child? _child;
+    private string _ageText = string.Empty;
+    private string _nowText = string.Empty;
+    private DateTime? _date = DateTime.Today;
+    private MealDaySummary _summary = new(DateOnly.FromDateTime(DateTime.Today), []);
+    private IReadOnlyList<ChildAllergen> _allergens = [];
+    private int? _pendingDeleteId;
+    private int? _eatingId;
+
+    private bool _showForm;
+    private int? _editingId;
+    private string? _formMessage;
+    private MealType _formMealType = MealType.Breakfast;
+    private TimeSpan? _formTime = new TimeSpan(7, 30, 0);
+
+    /// <summary>餐次建议饭点的请求序号，用来丢弃「慢回来的旧查询」。见 OnMealTypeChangedAsync。</summary>
+    private int _mealTypeToken;
+    private string _formMenu = string.Empty;
+    private string? _formFoods;
+    private int? _formCalories;
+    private string? _formNotes;
+    private bool _formAllergyAck;
+    private bool _formAllergyDoubleConfirmed;
+    private IReadOnlyList<AllergyMatch> _formAllergyMatches = [];
+
+    private string? _finishNote;
+    private AppetiteLevel _finishAppetite = AppetiteLevel.Unknown;
+
+    private bool _showAi;
+    private bool _aiBusy;
+    private string? _aiError;
+    private KidPlan.Web.Services.Ai.MealRecommendationResult? _aiResult;
+    private KidPlan.Web.Services.Ai.MealRecommendationScope _aiScope = KidPlan.Web.Services.Ai.MealRecommendationScope.Day;
+    private MealType _aiMealType = MealType.Lunch;
+    private int _aiLookback = 7;
+    private int _aiMaxLookback = 30;
+    private bool _aiIncludeAdHoc = true;
+    private string? _aiProviderId;
+    private string? _aiModel;
+    private string? _aiExtra;
+    private IReadOnlyList<AiProviderConfig> _aiProviders = [];
+    private IReadOnlyList<string> _aiModels = [];
+    private bool _showPrompt;
+    private string _promptPreview = string.Empty;
+
+    [Parameter]
+    public int ChildId { get; set; }
+
+    /// <summary>可选：从「餐饮记录」点某一天跳过来时，用 ?date=yyyy-MM-dd 直接定位到那天。</summary>
+    [SupplyParameterFromQuery(Name = "date")]
+    public string? DateQuery { get; set; }
+
+    private IEnumerable<ChildAllergen> FoodAllergens =>
+        _allergens.Where(a => a.Kind == AllergenKind.Food);
+
+    private IReadOnlyList<ChildAllergen> _foodAllergens = [];
+
+    /// <summary>保存按钮什么时候可用：命中达到「需确认」以上时，必须勾选（强过敏还要二次确认）。</summary>
+    private bool CanSaveForm
+    {
+        get
+        {
+            if (AllergyMatcher.MaxSeverity(_formAllergyMatches) is not { } severity)
+            {
+                return true;
+            }
+
+            return severity.ToRiskAction() switch
+            {
+                AllergyRiskAction.Notice => true,
+                AllergyRiskAction.Confirm => _formAllergyAck,
+                _ => _formAllergyAck && _formAllergyDoubleConfirmed,
+            };
+        }
+    }
+
+    private string AllergyPolicyHint =>
+        "不耐受 / 轻微只提示；中等要勾选确认；强过敏 / 过敏性休克还要再点一次二次确认。";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (DateOnly.TryParse(DateQuery, out var requested))
+        {
+            _date = requested.ToDateTimeValue();
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        _child = await ChildService.FindAsync(ChildId, userId);
+        if (_child is null)
+        {
+            _loading = false;
+            return;
+        }
+
+        CurrentChild.Select(_child.Id);
+
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _ageText = AgeCalculator.Describe(_child.BirthDate, today);
+        _date ??= DateTime.Today;
+
+        _allergens = await ChildService.ListAllergensAsync(ChildId, userId);
+        _foodAllergens = _allergens.Where(a => a.Kind == AllergenKind.Food).ToList();
+
+        await _LoadAiSettingsAsync(userId);
+        await RefreshSummaryAsync(userId);
+        _loading = false;
+    }
+
+    private async Task RefreshSummaryAsync(string userId)
+    {
+        var date = _date.ToDateOnly() ?? DateOnly.FromDateTime(DateTime.Today);
+        _summary = await MealService.GetDayAsync(userId, ChildId, date);
+        _nowText = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private async Task RefreshAsync()
+    {
+        await RefreshSummaryAsync(await GetUserIdAsync());
+        StateHasChanged();
+    }
+
+    private async Task ShiftDayAsync(int days)
+    {
+        var current = _date.ToDateOnly() ?? DateOnly.FromDateTime(DateTime.Today);
+        _date = current.AddDays(days).ToDateTimeValue();
+        await RefreshAsync();
+    }
+
+    private async Task JumpToTodayAsync()
+    {
+        _date = DateTime.Today;
+        await RefreshAsync();
+    }
+
+    private async Task OnDateChangedAsync(DateTime? value)
+    {
+        _date = value ?? DateTime.Today;
+        await RefreshAsync();
+    }
+
+    private void OnDateChanged(DateTime? value) => _ = OnDateChangedAsync(value);
+
+    // ------------------------------------------------------------------
+    // 表单
+    // ------------------------------------------------------------------
+
+    private async Task ToggleFormAsync()
+    {
+        _showForm = !_showForm;
+        if (_showForm && _editingId is null)
+        {
+            await ResetFormToDefaultAsync();
+        }
+    }
+
+    /// <summary>点「记一顿点心 / 零食」：直接把表单开在对应餐次上，饭点默认留空（不定时）。</summary>
+    private async Task QuickAddAsync(MealType type)
+    {
+        _showForm = true;
+        // 先把餐次定下来再重置表单：ResetFormToDefaultAsync 是按 _formMealType 取建议饭点的。
+        _formMealType = type;
+        await ResetFormToDefaultAsync();
+        // 加餐本来就不定时：不管以前有没有记过同餐次的饭点，这里一律留空。
+        _formTime = null;
+        _formMenu = string.Empty;
+    }
+
+    private async Task ResetFormToDefaultAsync()
+    {
+        _editingId = null;
+        _formMessage = null;
+        _formMenu = string.Empty;
+        _formFoods = null;
+        _formCalories = null;
+        _formNotes = null;
+        _formAllergyAck = false;
+        _formAllergyDoubleConfirmed = false;
+        _formAllergyMatches = [];
+
+        // 固定三餐沿用这个小孩以前用过的饭点；加餐默认不定时。
+        var token = ++_mealTypeToken;
+        var userId = await GetUserIdAsync();
+        var suggested = _formMealType.IsFixedMeal()
+            ? await MealService.GetSuggestedTimeAsync(userId, ChildId, _formMealType)
+            : null;
+
+        if (token != _mealTypeToken)
+        {
+            return;
+        }
+
+        _formTime = _formMealType.IsFixedMeal()
+            ? suggested?.ToTimeSpan() ?? new TimeSpan(8, 0, 0)
+            : null;
+
+        RecheckAllergy();
+    }
+
+    /// <summary>
+    /// 重置表单。注意这个方法**必须 await**：里面要查一次「以前用过的饭点」，
+    /// 用 `_ = ResetFormToDefaultAsync()` 火忘掉的话，赋值同样会晚于这次渲染。
+    /// </summary>
+    private Task ResetFormAsync() => ResetFormToDefaultAsync();
+
+    /// <summary>
+    /// 换餐次：固定三餐沿用这个小孩以前用过的饭点，加餐默认不定时。
+    ///
+    /// **踩过的坑（现象：午餐显示 7:30、晚餐显示 12:00，整体慢一拍）**：
+    /// 这里原来是 <c>void OnMealTypeChanged(type) =&gt; _ = OnMealTypeChangedAsync(type)</c>。
+    /// 火忘掉的异步任务里 <c>await</c> 之后才赋值 <c>_formTime</c>，而 Blazor 只会为
+    /// 「事件回调返回的那个 Task」在完成后重新渲染一次——它早就返回了。于是：
+    /// 那次赋值在状态里是对的，界面上却一直显示**上一个餐次**的饭点，
+    /// 直到下一次别的交互触发渲染才补上（看起来就像「错位了一格」）。
+    /// 所以：回调必须是返回 Task 的异步方法，让渲染等状态落定。
+    /// </summary>
+    private async Task OnMealTypeChangedAsync(MealType type)
+    {
+        var changedFromFixed = _formMealType.IsFixedMeal();
+
+        // 上一次查询还没回来时用户又换了餐次：给每次请求发一个号，
+        // 回来的时候对不上号就丢掉，避免慢请求盖掉新选择。
+        var token = ++_mealTypeToken;
+
+        _formMealType = type;
+
+        if (_editingId is null)
+        {
+            if (type.IsFixedMeal())
+            {
+                var userId = await GetUserIdAsync();
+                var suggested = await MealService.GetSuggestedTimeAsync(userId, ChildId, type);
+
+                if (token != _mealTypeToken)
+                {
+                    return;
+                }
+
+                _formTime = suggested?.ToTimeSpan() ?? new TimeSpan(8, 0, 0);
+            }
+            else if (changedFromFixed)
+            {
+                // 从三餐改成加餐时把饭点清掉，默认走「不定时」——这正是加餐的语义。
+                _formTime = null;
+            }
+        }
+    }
+
+    /// <summary>本地实时比对，输入时立刻给提示，不必等保存往返一次服务端。</summary>
+    private void RecheckAllergy()
+    {
+        _formAllergyMatches = AllergyMatcher.FindMatches(_foodAllergens, _formMenu, _formFoods);
+
+        if (_formAllergyMatches.Count == 0)
+        {
+            _formAllergyAck = false;
+            _formAllergyDoubleConfirmed = false;
+            return;
+        }
+
+        // 等级变低了（比如把菜单里的危险食材删掉），之前那次二次确认就不该继续算数。
+        var worst = _formAllergyMatches.Max(m => m.Severity);
+        if (worst.ToRiskAction() != AllergyRiskAction.DoubleConfirm)
+        {
+            _formAllergyDoubleConfirmed = false;
+        }
+    }
+
+    private void BeginEdit(MealPlan meal)
+    {
+        _editingId = meal.Id;
+        _showForm = true;
+        _formMessage = null;
+        _formMealType = meal.MealType;
+        _formTime = meal.PlannedTime?.ToTimeSpan();
+        _formMenu = meal.Menu;
+        _formFoods = meal.Foods;
+        _formCalories = meal.EstimatedCalories;
+        _formNotes = meal.Notes;
+        _formAllergyAck = meal.AllergyWarningAcknowledged;
+        _formAllergyDoubleConfirmed = meal.AllergyWarningAcknowledged
+            && meal.AllergyAcknowledgedMaxSeverity is { } severity
+            && severity.ToRiskAction() == AllergyRiskAction.DoubleConfirm;
+        RecheckAllergy();
+    }
+
+    private async Task SaveMealAsync()
+    {
+        _formMessage = null;
+
+        if (string.IsNullOrWhiteSpace(_formMenu))
+        {
+            _formMessage = "请填写这一餐吃什么。";
+            return;
+        }
+
+        if (_formMealType.IsFixedMeal() && _formTime is null)
+        {
+            _formMessage = "早餐 / 午餐 / 晚餐需要有饭点；点心、零食可以不定时。";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var date = _date.ToDateOnly() ?? DateOnly.FromDateTime(DateTime.Today);
+            var worst = AllergyMatcher.MaxSeverity(_formAllergyMatches);
+
+            var meal = new MealPlan
+            {
+                Id = _editingId ?? 0,
+                ChildId = ChildId,
+                Date = date,
+                MealType = _formMealType,
+                PlannedTime = _formTime.ToTimeOnly(),
+                Menu = _formMenu.Trim(),
+                Foods = _formFoods,
+                EstimatedCalories = _formCalories,
+                Notes = _formNotes,
+                AllergyWarningAcknowledged = _formAllergyAck,
+                // 把「确认时看到的是哪一级」回传上去：服务器据此判断
+                // 「勾了但没做二次确认」的情况，客户端绕不过这一关。
+                AllergyAcknowledgedMaxSeverity = _formAllergyAck ? worst : null,
+            };
+
+            var userId = await GetUserIdAsync();
+
+            if (_editingId is null)
+            {
+                await MealService.AddAsync(userId, ChildId, meal);
+                Snackbar.Add("已安排这一餐", Severity.Success);
+            }
+            else
+            {
+                await MealService.UpdateAsync(userId, meal);
+                Snackbar.Add("安排已更新", Severity.Success);
+            }
+
+            await ResetFormAsync();
+            _showForm = false;
+            await RefreshSummaryAsync(userId);
+        }
+        catch (AllergyConflictException ex)
+        {
+            // 服务端才是权威：本地检查漏掉的、或者并发改动了过敏原，都在这里被拦下来。
+            _formAllergyMatches = ex.Matches;
+            _formAllergyAck = false;
+            _formAllergyDoubleConfirmed = false;
+
+            _formMessage = ex.RequiresExplicitReconfirmation
+                ? $"服务端复核发现「{ex.MaxSeverity.ToChinese()}」级过敏原：{string.Join('、', ex.Matches.Select(m => m.Allergen))}。" +
+                  "请勾选「我知道风险」，再点一次二次确认。"
+                : $"这一餐命中了过敏原：{string.Join('、', ex.Matches.Select(m => m.Allergen))}（{ex.MaxSeverity.ToChinese()}）。" +
+                  "请勾选「我知道风险」后再保存。";
+        }
+        catch (ArgumentException ex)
+        {
+            _formMessage = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 确认 / 跳过 / 删除
+    // ------------------------------------------------------------------
+
+    private void BeginEat(MealPlan meal)
+    {
+        _eatingId = meal.Id;
+        _finishNote = null;
+        _finishAppetite = AppetiteLevel.Unknown;
+    }
+
+    private async Task MarkEatenAsync(MealPlan meal)
+    {
+        var userId = await GetUserIdAsync();
+        await MealService.MarkEatenAsync(userId, meal.Id, _finishNote, _finishAppetite);
+
+        _eatingId = null;
+        Snackbar.Add("已确认吃完", Severity.Success);
+        await RefreshSummaryAsync(userId);
+    }
+
+    private async Task SkipAsync(MealPlan meal)
+    {
+        var userId = await GetUserIdAsync();
+        await MealService.MarkSkippedAsync(userId, meal.Id);
+
+        Snackbar.Add("已标记为这餐不吃", Severity.Info);
+        await RefreshSummaryAsync(userId);
+    }
+
+    private async Task ReopenAsync(MealPlan meal)
+    {
+        var userId = await GetUserIdAsync();
+        await MealService.ReopenAsync(userId, meal.Id);
+
+        Snackbar.Add("已撤销确认，回到待确认状态", Severity.Info);
+        await RefreshSummaryAsync(userId);
+    }
+
+    private async Task DeleteMealAsync(MealPlan meal)
+    {
+        var userId = await GetUserIdAsync();
+        await MealService.DeleteAsync(userId, meal.Id);
+
+        _pendingDeleteId = null;
+        Snackbar.Add("已删除", Severity.Success);
+        await RefreshSummaryAsync(userId);
+    }
+
+    // ------------------------------------------------------------------
+    // AI 饮食推荐
+    // ------------------------------------------------------------------
+
+    private async Task _LoadAiSettingsAsync(string userId)
+    {
+        var settings = await AiSettings.GetEffectiveAsync(userId);
+
+        _aiProviders = settings.Providers.Where(p => p.Enabled).ToList();
+        _aiMaxLookback = Math.Clamp(
+            settings.Recommendation?.MaxLookbackDays ?? 30,
+            1,
+            KidPlan.Web.Services.Ai.MealRecommendationService.MaxLookbackDays);
+
+        _aiLookback = Math.Clamp(
+            settings.Recommendation?.DefaultLookbackDays ?? 7,
+            1,
+            _aiMaxLookback);
+
+        _aiProviderId ??= settings.DefaultProviderId ?? _aiProviders.FirstOrDefault()?.Id;
+        SyncAiModels(settings.DefaultModel);
+    }
+
+    private void SetAiProvider(string? providerId)
+    {
+        _aiProviderId = providerId;
+        _aiModel = null;
+        SyncAiModels(null);
+    }
+
+    private void SyncAiModels(string? preferred)
+    {
+        var provider = _aiProviders.FirstOrDefault(p => p.Id == _aiProviderId);
+        _aiModels = provider?.Models ?? [];
+
+        if (!string.IsNullOrWhiteSpace(preferred)
+            && (_aiModels.Count == 0 || _aiModels.Contains(preferred, StringComparer.OrdinalIgnoreCase)))
+        {
+            _aiModel = preferred;
+        }
+        else
+        {
+            _aiModel = _aiModels.FirstOrDefault();
+        }
+    }
+
+    private void ToggleAiPanel() => _showAi = !_showAi;
+
+    /// <summary>
+    /// 这次失败是不是「输出额度不够」这一类（推理模型最常见）。
+    /// 判断条件刻意只认错误文案里的几个关键词：错误是服务端拼的，
+    /// 这里不需要、也不应该再引一份枚举。
+    /// </summary>
+    private bool IsTokenBudgetProblem =>
+        _aiError is not null
+        && (_aiError.Contains("最大输出 token", StringComparison.Ordinal)
+            || _aiError.Contains("finish_reason=length", StringComparison.Ordinal)
+            || _aiError.Contains("推理", StringComparison.Ordinal));
+
+    private KidPlan.Web.Services.Ai.MealRecommendationRequest BuildAiRequest()
+    {
+        var target = _date.ToDateOnly() ?? DateOnly.FromDateTime(DateTime.Today);
+
+        return new KidPlan.Web.Services.Ai.MealRecommendationRequest(
+            ChildId,
+            _aiScope,
+            target,
+            _aiScope == KidPlan.Web.Services.Ai.MealRecommendationScope.Meal ? _aiMealType : null,
+            _aiLookback,
+            _aiIncludeAdHoc,
+            _aiProviderId,
+            _aiModel,
+            _aiExtra);
+    }
+
+    private async Task GenerateAsync()
+    {
+        _aiBusy = true;
+        _aiError = null;
+        _showPrompt = false;
+
+        try
+        {
+            var userId = await GetUserIdAsync();
+            _aiResult = await Recommender.RecommendAsync(userId, BuildAiRequest());
+
+            if (!_aiResult.Success)
+            {
+                _aiError = _aiResult.Error;
+            }
+            else if (_aiResult.Suggestions.Count == 0)
+            {
+                _aiError = "模型没有给出任何可用的建议，换一个模型或把温度调低再试。";
+            }
+            else
+            {
+                Snackbar.Add($"已生成 {_aiResult.Suggestions.Count} 条建议", Severity.Success);
+            }
+        }
+        catch (Exception ex)
+        {
+            _aiError = ex.Message;
+        }
+        finally
+        {
+            _aiBusy = false;
+        }
+    }
+
+    private async Task PreviewPromptAsync()
+    {
+        _aiBusy = true;
+        try
+        {
+            var userId = await GetUserIdAsync();
+            _promptPreview = await Recommender.BuildPromptPreviewAsync(userId, BuildAiRequest());
+            _showPrompt = true;
+        }
+        catch (Exception ex)
+        {
+            _aiError = ex.Message;
+        }
+        finally
+        {
+            _aiBusy = false;
+        }
+    }
+
+    private async Task ImportAllAsync()
+    {
+        if (_aiResult is null || _aiResult.Suggestions.Count == 0)
+        {
+            return;
+        }
+
+        await ImportAsync(_aiResult.Suggestions);
+    }
+
+    private async Task ImportOneAsync(KidPlan.Web.Services.Ai.MealSuggestion suggestion)
+    {
+        await ImportAsync([suggestion]);
+    }
+
+    private async Task ImportAsync(IReadOnlyList<KidPlan.Web.Services.Ai.MealSuggestion> suggestions)
+    {
+        _aiBusy = true;
+        _aiError = null;
+
+        try
+        {
+            var userId = await GetUserIdAsync();
+            var result = await MealService.ImportAsync(
+                userId,
+                ChildId,
+                suggestions.Select(s => s.ToMealPlan()));
+
+            if (result.Created.Count > 0)
+            {
+                Snackbar.Add($"已写入 {result.Created.Count} 餐", Severity.Success);
+            }
+
+            if (result.Rejected.Count > 0)
+            {
+                _aiError = "有 " + result.Rejected.Count + " 条没有写入："
+                    + string.Join("；", result.Rejected.Select(r => $"「{r.Meal.Menu}」{r.Reason}"));
+            }
+
+            await RefreshSummaryAsync(userId);
+        }
+        catch (Exception ex)
+        {
+            _aiError = ex.Message;
+        }
+        finally
+        {
+            _aiBusy = false;
+        }
+    }
+}

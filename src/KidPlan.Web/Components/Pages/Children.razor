@@ -1,0 +1,219 @@
+@page "/children"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject ISnackbar Snackbar
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+
+<PageTitle>小孩管理 · KidPlan</PageTitle>
+
+<div class="d-flex align-center flex-wrap gap-2 mb-4">
+    <MudText Typo="Typo.h5">小孩管理</MudText>
+    <MudSpacer />
+    <MudSwitch T="bool" Value="_showArchived" ValueChanged="OnShowArchivedChanged" Label="显示已归档" Color="Color.Primary" Size="Size.Small" />
+    <MudButton Href="/children/new"
+               Variant="Variant.Filled"
+               Color="Color.Primary"
+               StartIcon="@Icons.Material.Filled.Add">
+        登记新小孩
+    </MudButton>
+</div>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_items.Count == 0)
+{
+    <MudPaper Elevation="0" Class="pa-8 text-center">
+        <MudText Typo="Typo.h6" Class="mb-2">还没有小孩档案</MudText>
+        <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+            每个小孩的档案、身体记录和饮食安排都是独立分开的。
+        </MudText>
+        <MudButton Href="/children/new" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add">
+            立即登记
+        </MudButton>
+    </MudPaper>
+}
+else
+{
+    <MudSimpleTable Hover="true" Dense="true" Bordered="false" Striped="true">
+        <thead>
+            <tr>
+                <th>小孩</th>
+                <th>年龄</th>
+                <th>性别</th>
+                <th>过敏食物</th>
+                <th>身体记录</th>
+                <th>饮食安排</th>
+                <th>最近测量</th>
+                <th style="width:1%">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in _items)
+            {
+                var child = item.Child;
+                <tr style="@(child.IsArchived ? "opacity:.55" : null)">
+                    <td>
+                        <div class="d-flex align-center">
+                            <span style="font-size:1.4rem">@(child.AvatarEmoji ?? Ui.GenderEmoji(child.Gender))</span>
+                            <div class="ml-2">
+                                <div><strong>@child.Alias</strong>@(child.IsArchived ? "（已归档）" : "")</div>
+                                @if (!string.IsNullOrWhiteSpace(child.FullName))
+                                {
+                                    <div class="text-muted-sm">@child.FullName</div>
+                                }
+                            </div>
+                        </div>
+                    </td>
+                    <td>@item.AgeText</td>
+                    <td>@child.Gender.ToChinese()</td>
+                    <td>
+                        @if (string.IsNullOrWhiteSpace(child.AllergicFoods))
+                        {
+                            <span class="text-muted-sm">无</span>
+                        }
+                        else
+                        {
+                            <span style="color:#b3252a">@child.AllergicFoods</span>
+                        }
+                    </td>
+                    <td>@item.GrowthRecordCount</td>
+                    <td>@item.MealPlanCount</td>
+                    <td>
+                        @if (item.LatestRecordDate is { } d)
+                        {
+                            <div class="text-muted-sm">@d.ToString("yyyy-MM-dd")</div>
+                            <div class="text-muted-sm">
+                                @(item.LatestHeightCm is { } h ? $"{h:0.#}cm" : "")
+                                @(item.LatestWeightKg is { } w ? $"{w:0.##}kg" : "")
+                            </div>
+                        }
+                        else
+                        {
+                            <span class="text-muted-sm">—</span>
+                        }
+                    </td>
+                    <td>
+                        @if (_pendingDeleteId == child.Id)
+                        {
+                            <div class="d-flex align-center gap-1">
+                                <MudText Typo="Typo.caption" Style="color:#b3252a;white-space:nowrap">删除全部数据？</MudText>
+                                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled" OnClick="@(() => DeleteAsync(child))">
+                                    确认
+                                </MudButton>
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => _pendingDeleteId = null)">
+                                    取消
+                                </MudButton>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="d-flex flex-wrap gap-1">
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@Icons.Material.Filled.MonitorHeart"
+                                               Color="Color.Primary"
+                                               title="身体管理"
+                                               OnClick="@(() => Go($"/children/{child.Id}/body"))" />
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@Icons.Material.Filled.ShowChart"
+                                               Color="Color.Primary"
+                                               title="成长曲线"
+                                               OnClick="@(() => Go($"/children/{child.Id}/growth"))" />
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@Icons.Material.Filled.Restaurant"
+                                               Color="Color.Primary"
+                                               title="饮食安排"
+                                               OnClick="@(() => Go($"/children/{child.Id}/meals"))" />
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@Icons.Material.Filled.Edit"
+                                               title="编辑资料"
+                                               OnClick="@(() => Go($"/children/{child.Id}/edit"))" />
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@(child.IsArchived ? Icons.Material.Filled.Unarchive : Icons.Material.Filled.Archive)"
+                                               title="@(child.IsArchived ? "取消归档" : "归档")"
+                                               OnClick="@(() => ArchiveAsync(child))" />
+                                <MudIconButton Size="Size.Small"
+                                               Icon="@Icons.Material.Filled.Delete"
+                                               Color="Color.Error"
+                                               title="删除"
+                                               OnClick="@(() => _pendingDeleteId = child.Id)" />
+                            </div>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </MudSimpleTable>
+
+    <MudText Typo="Typo.caption" Class="text-muted-sm mt-2">
+        共 @_items.Count 个档案。归档后不会出现在默认列表和切换器里，但数据仍然保留。
+    </MudText>
+}
+
+@code {
+    private bool _loading = true;
+    private bool _showArchived;
+    private int? _pendingDeleteId;
+    private IReadOnlyList<ChildListItem> _items = [];
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+        var all = await ChildService.ListWithStatsAsync(userId);
+
+        // 服务端始终返回全部（已归档的排在后面），是否显示由这里过滤。
+        _items = _showArchived
+            ? all
+            : all.Where(i => !i.Child.IsArchived).ToList();
+
+        _loading = false;
+    }
+
+    private async Task OnShowArchivedChanged(bool value)
+    {
+        _showArchived = value;
+        await LoadAsync();
+        StateHasChanged();
+    }
+
+    private void Go(string url) => NavigationManager.NavigateTo(url);
+
+    private async Task ArchiveAsync(Child child)
+    {
+        var userId = await GetUserIdAsync();
+        await ChildService.SetArchivedAsync(userId, child.Id, !child.IsArchived);
+
+        if (child.IsArchived)
+        {
+            Snackbar.Add($"已恢复「{child.Alias}」", Severity.Success);
+        }
+        else
+        {
+            Snackbar.Add($"已归档「{child.Alias}」", Severity.Info);
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(Child child)
+    {
+        var userId = await GetUserIdAsync();
+        await ChildService.DeleteAsync(userId, child.Id);
+
+        _pendingDeleteId = null;
+
+        if (CurrentChild.ChildId == child.Id)
+        {
+            CurrentChild.Select(null);
+        }
+
+        Snackbar.Add($"已删除「{child.Alias}」及其全部记录", Severity.Success);
+        await LoadAsync();
+    }
+}

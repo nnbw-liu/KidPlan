@@ -1,0 +1,59 @@
+@using MudBlazor
+@using Microsoft.AspNetCore.Http
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <base href="/" />
+    <ResourcePreloader />
+
+    <link rel="stylesheet" href="@Assets["_content/MudBlazor/MudBlazor.min.css"]" />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <link rel="stylesheet" href="@Assets["auth.css"]" />
+    <link rel="stylesheet" href="@Assets["KidPlan.Web.styles.css"]" />
+
+    <ImportMap />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <HeadOutlet @rendermode="PageRenderMode" />
+</head>
+
+<body>
+    @* MudBlazor 的 Provider 不能放在这里！
+       业务页是通过下面的 <Routes @rendermode="PageRenderMode" /> 单独进入交互式渲染的，
+       它和 <body> 里的这部分静态内容属于**两个不同的渲染作用域**，级联值也不互通。
+       放在这里的 Provider 交互式组件根本看不到，运行时会报
+       “Missing <MudPopoverProvider /> in the active render scope”，
+       结果是下拉框 / 菜单 / 日期选择器全都弹不出来。
+       所以四个 Provider 都放在 MainLayout 里，见 Layout/MainLayout.razor。 *@
+
+    @* 按页面决定渲染模式：
+       - 业务页（首页 / 小孩档案 / 成长 / 饮食）用交互式服务端渲染，按钮点击才有效；
+       - 账号页（Components/Account）带 [ExcludeFromInteractiveRouting]，这里退回静态 SSR。
+
+       为什么账号页必须是静态 SSR：注册 / 登录 / 改密码要在**请求-响应周期**里
+       由 SignInManager 读写认证 Cookie，而交互式渲染跑在 SignalR circuit 上，
+       那里没有 HttpContext，写 Cookie 必然失败。
+       注意：光加 [ExcludeFromInteractiveRouting] 只够挡住“交互式导航”，
+       初始请求同样要在这里返回 null 才会真正静态渲染。 *@
+    <Routes @rendermode="PageRenderMode" />
+    <ReconnectModal />
+
+    <script src="@Assets["_content/MudBlazor/MudBlazor.min.js"]"></script>
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+</body>
+
+</html>
+
+@code {
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    /// <summary>
+    /// 当前请求该用哪种渲染模式。<c>null</c> 表示静态 SSR（继承 App 自身的静态渲染）。
+    /// </summary>
+    private IComponentRenderMode? PageRenderMode
+        => HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+}

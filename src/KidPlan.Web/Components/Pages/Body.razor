@@ -1,0 +1,572 @@
+@page "/children/{ChildId:int}/body"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject IGrowthService GrowthService
+@inject ISnackbar Snackbar
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+
+@* =====================================================================
+   身体管理：记一条身体情况、看最新数值、改 / 删历史记录。
+
+   这里和「成长曲线」是**两个页面**。以前挤在一页里，最上面是卡片和记录表单、
+   中间才是曲线和一堆筛选器，想看曲线要先滚过半屏表单，想改一条记录又得滚回来。
+   现在按「记数据」和「看曲线」分开：
+     · /children/{id}/body   —— 本页，记录 + 数值 + 历史列表
+     · /children/{id}/growth —— 只留曲线和筛选（指标、分图/叠加、记录方式、时间范围）
+   数据两个页面共用同一份 GrowthRecord 表，拆的只是界面。
+   ===================================================================== *@
+
+<PageTitle>身体管理 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_child is null)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    @* ---------------- 头部 ---------------- *@
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <span style="font-size:2rem;line-height:1">@(_child.AvatarEmoji ?? Ui.GenderEmoji(_child.Gender))</span>
+        <MudText Typo="Typo.h5">@_child.Alias 的身体管理</MudText>
+        <MudSpacer />
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.ShowChart"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/growth"))">
+            成长曲线
+        </MudButton>
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Restaurant"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meals"))">
+            饮食安排
+        </MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+        @_ageText · 出生 @_child.BirthDate.ToString("yyyy-MM-dd") · 共 @_records.Count 条记录
+    </MudText>
+
+    @* ---------------- 过敏原（分级） ---------------- *@
+    @if (_allergens.Count > 0)
+    {
+        <MudPaper Elevation="0" Class="pa-3 mb-4">
+            <div class="d-flex align-center flex-wrap gap-2">
+                <MudText Typo="Typo.subtitle2">🧬 过敏原</MudText>
+                @if (_allergens.Any(a => a.NeedsReview))
+                {
+                    <MudText Typo="Typo.caption" Style="color:#b8860b">
+                        有 @_allergens.Count(a => a.NeedsReview) 条是从旧文本迁移过来的，等级待你复核
+                    </MudText>
+                }
+                <MudSpacer />
+                <MudButton Size="Size.Small" Variant="Variant.Text"
+                           OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/allergens"))">
+                    管理过敏原
+                </MudButton>
+            </div>
+            <div class="d-flex flex-wrap gap-1 mt-2">
+                @foreach (var allergen in _allergens)
+                {
+                    <MudChip T="string" Size="Size.Small"
+                             Color="@Ui.AllergyColor(allergen.Severity)"
+                             Variant="@Ui.AllergyVariant(allergen.Severity)">
+                        @allergen.Name · @allergen.Severity.ToChinese()
+                        @if (allergen.Kind == AllergenKind.Other)
+                        {
+                            <span>（非食物）</span>
+                        }
+                    </MudChip>
+                }
+            </div>
+        </MudPaper>
+    }
+    else
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mb-4">
+            还没有登记过敏原。建议先去
+            <a href="@($"/children/{ChildId}/allergens")">过敏原管理</a>
+            里登记并分级——饮食安排会按等级决定提醒强度，AI 饮食推荐也会按它来回避。
+        </MudAlert>
+    }
+
+    @* ---------------- 最新数据 ---------------- *@
+    <MudGrid Class="mb-2">
+        @foreach (var card in SummaryCards())
+        {
+            <MudItem xs="6" md="3">
+                <MudPaper Elevation="0" Class="pa-3">
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">@card.Title</MudText>
+                    <MudText Typo="Typo.h6">@card.Value</MudText>
+                    @if (!string.IsNullOrEmpty(card.Delta))
+                    {
+                        <MudText Typo="Typo.caption" Style="@card.DeltaColor">@card.Delta</MudText>
+                    }
+                </MudPaper>
+            </MudItem>
+        }
+    </MudGrid>
+
+    @* ---------------- 记录表单 ---------------- *@
+    <div class="d-flex flex-wrap gap-2 my-4">
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   StartIcon="@Icons.Material.Filled.Add"
+                   OnClick="ToggleForm">
+            @(_showForm ? "收起记录表单" : "记录身体情况")
+        </MudButton>
+        <MudButton Variant="Variant.Outlined"
+                   StartIcon="@Icons.Material.Filled.Edit"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/edit"))">
+            编辑小孩资料
+        </MudButton>
+    </div>
+
+    @if (_showForm)
+    {
+        <MudPaper Elevation="1" Class="pa-4 pa-md-6 mb-4">
+            <MudText Typo="Typo.h6" Class="mb-3">@(_editingId is null ? "新增一条记录" : "修改这条记录")</MudText>
+
+            @if (_formMessage is not null)
+            {
+                <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Dense="true" Class="mb-3">@_formMessage</MudAlert>
+            }
+
+            <MudGrid>
+                <MudItem xs="12" md="4">
+                    <MudSelect T="RecordKind" @bind-Value="_formKind" Label="记录方式" Variant="Variant.Outlined"
+                               HelperText="单次=某个时间点；时段=一段时间（如这一周）">
+                        <MudSelectItem T="RecordKind" Value="RecordKind.Point">单次记录</MudSelectItem>
+                        <MudSelectItem T="RecordKind" Value="RecordKind.Period">时段记录</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+
+                @if (_formKind == RecordKind.Point)
+                {
+                    <MudItem xs="12" md="4">
+                        <MudDatePicker @bind-Date="_formDate" Label="记录日期" Variant="Variant.Outlined" DateFormat="yyyy-MM-dd" />
+                    </MudItem>
+                    <MudItem xs="12" md="4">
+                        <MudTimePicker @bind-Time="_formTime" Label="记录时间" Variant="Variant.Outlined" TimeFormat="HH:mm" />
+                    </MudItem>
+                }
+                else
+                {
+                    <MudItem xs="12" md="4">
+                        <MudDatePicker @bind-Date="_formPeriodStart" Label="时段开始" Variant="Variant.Outlined" DateFormat="yyyy-MM-dd" />
+                    </MudItem>
+                    <MudItem xs="12" md="4">
+                        <MudDatePicker @bind-Date="_formPeriodEnd" Label="时段结束" Variant="Variant.Outlined" DateFormat="yyyy-MM-dd" />
+                    </MudItem>
+                }
+
+                <MudItem xs="12">
+                    <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Filled.Schedule" OnClick="UseNow">
+                        用当前时间
+                    </MudButton>
+                </MudItem>
+
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="decimal?" @bind-Value="_formHeight" Label="身高 (cm)" Variant="Variant.Outlined"
+                                     Min="0m" Max="300m" Step="0.1m" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="decimal?" @bind-Value="_formWeight" Label="体重 (kg)" Variant="Variant.Outlined"
+                                     Min="0m" Max="300m" Step="0.01m" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="decimal?" @bind-Value="_formTemperature" Label="体温 (℃)" Variant="Variant.Outlined"
+                                     Min="30m" Max="45m" Step="0.1m" />
+                </MudItem>
+
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="decimal?" @bind-Value="_formSleep" Label="睡眠 (小时)" Variant="Variant.Outlined"
+                                     Min="0m" Max="24m" Step="0.5m"
+                                     HelperText="@(_formKind == RecordKind.Period ? "时段内平均每天" : null)" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="int?" @bind-Value="_formExercise" Label="运动 (分钟)" Variant="Variant.Outlined"
+                                     Min="0" Max="1440" Step="5" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudSelect T="AppetiteLevel" @bind-Value="_formAppetite" Label="食欲" Variant="Variant.Outlined">
+                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Unknown">未记录</MudSelectItem>
+                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Poor">很差</MudSelectItem>
+                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Fair">一般</MudSelectItem>
+                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Good">不错</MudSelectItem>
+                        <MudSelectItem T="AppetiteLevel" Value="AppetiteLevel.Excellent">很好</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudSelect T="MoodLevel" @bind-Value="_formMood" Label="精神状态" Variant="Variant.Outlined">
+                        <MudSelectItem T="MoodLevel" Value="MoodLevel.Unknown">未记录</MudSelectItem>
+                        <MudSelectItem T="MoodLevel" Value="MoodLevel.Low">低落</MudSelectItem>
+                        <MudSelectItem T="MoodLevel" Value="MoodLevel.Normal">平稳</MudSelectItem>
+                        <MudSelectItem T="MoodLevel" Value="MoodLevel.Happy">开心</MudSelectItem>
+                        <MudSelectItem T="MoodLevel" Value="MoodLevel.Excited">兴奋</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+
+                <MudItem xs="12" md="6">
+                    <MudTextField T="string" @bind-Value="_formSymptoms" Label="症状 / 不适" Variant="Variant.Outlined"
+                                  Placeholder="例如：咳嗽、流鼻涕、肚子不舒服" MaxLength="500" />
+                </MudItem>
+                <MudItem xs="12" md="6">
+                    <MudTextField T="string" @bind-Value="_formNotes" Label="备注" Variant="Variant.Outlined"
+                                  Placeholder="例如：在社区医院量的、饭后测量" MaxLength="1000" />
+                </MudItem>
+            </MudGrid>
+
+            <MudDivider Class="my-4" />
+
+            <div class="d-flex flex-wrap gap-2">
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_saving"
+                           StartIcon="@Icons.Material.Filled.Save" OnClick="SaveRecordAsync">
+                    @(_editingId is null ? "保存记录" : "保存修改")
+                </MudButton>
+                <MudButton Variant="Variant.Text" OnClick="ResetForm">清空</MudButton>
+            </div>
+        </MudPaper>
+    }
+
+    @* ---------------- 记录列表 ---------------- *@
+    <MudText Typo="Typo.h6" Class="mt-6 mb-2">全部记录</MudText>
+
+    @if (_records.Count == 0)
+    {
+        <MudPaper Elevation="0" Class="pa-6 text-center">
+            <MudText Typo="Typo.body2" Class="text-muted-sm">还没有任何身体记录。</MudText>
+        </MudPaper>
+    }
+    else
+    {
+        <MudText Typo="Typo.caption" Class="text-muted-sm">
+            共 @_records.Count 条。数值会同时出现在
+            <a href="@($"/children/{ChildId}/growth")">成长曲线</a>
+            上——那边只画有数值的记录。
+        </MudText>
+
+        <MudSimpleTable Hover="true" Dense="true" Striped="true" Class="mt-2">
+            <thead>
+                <tr>
+                    <th style="white-space:nowrap">记录时间</th>
+                    <th>方式</th>
+                    <th>身高</th>
+                    <th>体重</th>
+                    <th>BMI</th>
+                    <th>体温</th>
+                    <th>睡眠</th>
+                    <th>运动</th>
+                    <th>食欲</th>
+                    <th>精神</th>
+                    <th>症状 / 备注</th>
+                    <th style="width:1%">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var record in _records)
+                {
+                    <tr>
+                        <td style="white-space:nowrap">@FormatRecordTime(record)</td>
+                        <td>@record.Kind.ToChinese()</td>
+                        <td>@Num(record.HeightCm)</td>
+                        <td>@Num(record.WeightKg)</td>
+                        <td>@Num(record.Bmi)</td>
+                        <td>@Num(record.TemperatureC)</td>
+                        <td>@Num(record.SleepHours)</td>
+                        <td>@(record.ExerciseMinutes is { } m ? $"{m} 分" : "—")</td>
+                        <td>@record.Appetite.ToChinese()</td>
+                        <td>@record.Mood.ToChinese()</td>
+                        <td>
+                            @if (!string.IsNullOrWhiteSpace(record.Symptoms))
+                            {
+                                <div>@record.Symptoms</div>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(record.Notes))
+                            {
+                                <div class="text-muted-sm">@record.Notes</div>
+                            }
+                        </td>
+                        <td>
+                            @if (_pendingDeleteId == record.Id)
+                            {
+                                <div class="d-flex align-center gap-1">
+                                    <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Filled"
+                                               OnClick="@(() => DeleteRecordAsync(record))">
+                                        确认
+                                    </MudButton>
+                                    <MudButton Size="Size.Small" Variant="Variant.Text"
+                                               OnClick="@(() => _pendingDeleteId = null)">
+                                        取消
+                                    </MudButton>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="d-flex gap-1">
+                                    <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Edit"
+                                                   title="修改" OnClick="@(() => BeginEdit(record))" />
+                                    <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete"
+                                                   Color="Color.Error" title="删除"
+                                                   OnClick="@(() => _pendingDeleteId = record.Id)" />
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </MudSimpleTable>
+    }
+}
+
+@code {
+    private bool _loading = true;
+    private bool _saving;
+    private Child? _child;
+    private string _ageText = string.Empty;
+    private IReadOnlyList<GrowthRecord> _records = [];
+    private IReadOnlyList<ChildAllergen> _allergens = [];
+    private GrowthSummary? _summary;
+    private int? _pendingDeleteId;
+
+    private bool _showForm;
+    private int? _editingId;
+    private string? _formMessage;
+
+    private RecordKind _formKind = RecordKind.Point;
+    private DateTime? _formDate = DateTime.Today;
+    private TimeSpan? _formTime = DateTime.Now.TimeOfDay;
+    private DateTime? _formPeriodStart;
+    private DateTime? _formPeriodEnd;
+    private decimal? _formHeight;
+    private decimal? _formWeight;
+    private decimal? _formTemperature;
+    private decimal? _formSleep;
+    private int? _formExercise;
+    private AppetiteLevel _formAppetite = AppetiteLevel.Unknown;
+    private MoodLevel _formMood = MoodLevel.Unknown;
+    private string? _formSymptoms;
+    private string? _formNotes;
+
+    [Parameter]
+    public int ChildId { get; set; }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        _child = await ChildService.FindAsync(ChildId, userId);
+        if (_child is null)
+        {
+            _loading = false;
+            return;
+        }
+
+        CurrentChild.Select(_child.Id);
+
+        _ageText = AgeCalculator.Describe(_child.BirthDate, DateOnly.FromDateTime(DateTime.Today));
+
+        _allergens = await ChildService.ListAllergensAsync(ChildId, userId);
+        _records = await GrowthService.ListAsync(userId, ChildId);
+        _summary = await GrowthService.BuildSummaryAsync(userId, ChildId);
+
+        _loading = false;
+    }
+
+    private IEnumerable<(string Title, string Value, string Delta, string DeltaColor)> SummaryCards()
+    {
+        if (_summary is null)
+        {
+            yield return ("身高", "—", "还没有记录", "color:#6b7385");
+            yield return ("体重", "—", "", "color:#6b7385");
+            yield return ("体温", "—", "", "color:#6b7385");
+            yield return ("BMI", "—", "", "color:#6b7385");
+            yield break;
+        }
+
+        yield return ("身高", _summary.HeightCm is { } h ? $"{h:0.#} cm" : "—",
+            DeltaLabel(_summary.HeightDelta, "cm"), DeltaColor(_summary.HeightDelta));
+        yield return ("体重", _summary.WeightKg is { } w ? $"{w:0.##} kg" : "—",
+            DeltaLabel(_summary.WeightDelta, "kg"), DeltaColor(_summary.WeightDelta));
+        yield return ("体温", _summary.TemperatureC is { } t ? $"{t:0.#} ℃" : "—",
+            _summary.LatestDate is { } td ? $"测量于 {td:MM-dd}" : string.Empty, "color:#6b7385");
+        yield return ("BMI", _summary.Bmi is { } bmi ? $"{bmi:0.#}" : "—",
+            _summary.LatestDate is { } d ? $"测量于 {d:MM-dd}" : string.Empty, "color:#6b7385");
+    }
+
+    private static string DeltaLabel(decimal? delta, string unit) => delta switch
+    {
+        null => "较上次：无对比数据",
+        > 0 => $"较上次 ↑ {delta.Value:0.##} {unit}",
+        < 0 => $"较上次 ↓ {Math.Abs(delta.Value):0.##} {unit}",
+        _ => "较上次：持平",
+    };
+
+    private static string DeltaColor(decimal? delta) => delta switch
+    {
+        > 0 => "color:#1d7a52",
+        < 0 => "color:#b3252a",
+        _ => "color:#6b7385",
+    };
+
+    private void ToggleForm()
+    {
+        _showForm = !_showForm;
+        if (_showForm && _editingId is null)
+        {
+            UseNow();
+        }
+    }
+
+    private void UseNow()
+    {
+        var now = DateTime.Now;
+        _formDate = now;
+        _formTime = now.TimeOfDay;
+        _formPeriodEnd = now;
+        _formPeriodStart ??= now.AddDays(-6);
+    }
+
+    private void ResetForm()
+    {
+        _editingId = null;
+        _formMessage = null;
+        _formKind = RecordKind.Point;
+        _formHeight = null;
+        _formWeight = null;
+        _formTemperature = null;
+        _formSleep = null;
+        _formExercise = null;
+        _formAppetite = AppetiteLevel.Unknown;
+        _formMood = MoodLevel.Unknown;
+        _formSymptoms = null;
+        _formNotes = null;
+        _formPeriodStart = null;
+        _formPeriodEnd = null;
+        UseNow();
+    }
+
+    private void BeginEdit(GrowthRecord record)
+    {
+        _editingId = record.Id;
+        _showForm = true;
+        _formMessage = null;
+
+        _formKind = record.Kind;
+        var local = record.RecordedAt.LocalDateTime;
+        _formDate = local;
+        _formTime = local.TimeOfDay;
+        _formPeriodStart = record.PeriodStart.ToDateTimeValue();
+        _formPeriodEnd = record.PeriodEnd.ToDateTimeValue();
+        _formHeight = record.HeightCm;
+        _formWeight = record.WeightKg;
+        _formTemperature = record.TemperatureC;
+        _formSleep = record.SleepHours;
+        _formExercise = record.ExerciseMinutes;
+        _formAppetite = record.Appetite;
+        _formMood = record.Mood;
+        _formSymptoms = record.Symptoms;
+        _formNotes = record.Notes;
+    }
+
+    private async Task SaveRecordAsync()
+    {
+        _formMessage = null;
+
+        var hasAnyValue = _formHeight is not null || _formWeight is not null
+            || _formTemperature is not null || _formSleep is not null || _formExercise is not null
+            || _formAppetite != AppetiteLevel.Unknown || _formMood != MoodLevel.Unknown
+            || !string.IsNullOrWhiteSpace(_formSymptoms) || !string.IsNullOrWhiteSpace(_formNotes);
+
+        if (!hasAnyValue)
+        {
+            _formMessage = "至少填一项内容（身高、体重、体温、睡眠、运动、食欲、精神、症状或备注）。";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var date = _formDate.ToDateOnly() ?? DateOnly.FromDateTime(DateTime.Today);
+            var time = _formTime.ToTimeOnly() ?? TimeOnly.FromDateTime(DateTime.Now);
+            var wallClock = date.ToDateTime(time);
+
+            var record = new GrowthRecord
+            {
+                Id = _editingId ?? 0,
+                ChildId = ChildId,
+                Kind = _formKind,
+                RecordedAt = new DateTimeOffset(wallClock, TimeZoneInfo.Local.GetUtcOffset(wallClock)),
+                PeriodStart = _formKind == RecordKind.Period ? _formPeriodStart.ToDateOnly() : null,
+                PeriodEnd = _formKind == RecordKind.Period ? _formPeriodEnd.ToDateOnly() : null,
+                HeightCm = _formHeight,
+                WeightKg = _formWeight,
+                TemperatureC = _formTemperature,
+                SleepHours = _formSleep,
+                ExerciseMinutes = _formExercise,
+                Appetite = _formAppetite,
+                Mood = _formMood,
+                Symptoms = _formSymptoms,
+                Notes = _formNotes,
+            };
+
+            var userId = await GetUserIdAsync();
+
+            if (_editingId is null)
+            {
+                await GrowthService.AddAsync(userId, ChildId, record);
+                Snackbar.Add("记录已保存", Severity.Success);
+            }
+            else
+            {
+                await GrowthService.UpdateAsync(userId, record);
+                Snackbar.Add("记录已更新", Severity.Success);
+            }
+
+            ResetForm();
+            _showForm = false;
+            await LoadAsync();
+        }
+        catch (ArgumentException ex)
+        {
+            _formMessage = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteRecordAsync(GrowthRecord record)
+    {
+        var userId = await GetUserIdAsync();
+        await GrowthService.DeleteAsync(userId, record.Id);
+
+        _pendingDeleteId = null;
+        Snackbar.Add("记录已删除", Severity.Success);
+        await LoadAsync();
+    }
+
+    private static string FormatRecordTime(GrowthRecord record)
+    {
+        var local = record.RecordedAt.LocalDateTime;
+        return record.Kind == RecordKind.Period && record.PeriodStart is { } start && record.PeriodEnd is { } end
+            ? $"{start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}"
+            : local.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private static string Num(decimal? value) => value?.ToString("0.##") ?? "—";
+}

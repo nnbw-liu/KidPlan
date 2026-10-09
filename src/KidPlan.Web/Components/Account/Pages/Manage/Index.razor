@@ -1,0 +1,99 @@
+@page "/Account/Manage"
+
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Identity
+@using KidPlan.Web.Data
+
+@inject UserManager<ApplicationUser> UserManager
+@inject SignInManager<ApplicationUser> SignInManager
+@inject IdentityRedirectManager RedirectManager
+
+<PageTitle>账号设置 · KidPlan</PageTitle>
+
+<h1 class="mud-typography-h5 mb-4">账号设置</h1>
+
+<StatusMessage />
+
+<EditForm Model="Input" FormName="profile" OnValidSubmit="OnValidSubmitAsync" method="post">
+    <DataAnnotationsValidator />
+    <ValidationSummary class="auth-validation-summary" role="alert" />
+
+    <div class="auth-field" style="max-width:420px">
+        <label for="username">登录邮箱</label>
+        <input type="text" id="username" value="@username" class="auth-input" disabled />
+    </div>
+
+    <div class="auth-field" style="max-width:420px">
+        <label for="Input.DisplayName">你的称呼</label>
+        <InputText @bind-Value="Input.DisplayName" id="Input.DisplayName" class="auth-input" placeholder="例如：妈妈" />
+        <ValidationMessage For="() => Input.DisplayName" class="auth-error" />
+    </div>
+
+    <div class="auth-field" style="max-width:420px">
+        <label for="createdAt">注册时间</label>
+        <input type="text" id="createdAt" value="@createdAtText" class="auth-input" disabled />
+    </div>
+
+    <button type="submit" class="auth-btn" style="max-width:420px">保存</button>
+</EditForm>
+
+@code {
+    private ApplicationUser? user;
+    private string? username;
+    private string createdAtText = string.Empty;
+
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    [SupplyParameterFromForm]
+    private InputModel Input { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Input ??= new();
+
+        user = await UserManager.GetUserAsync(HttpContext.User);
+        if (user is null)
+        {
+            RedirectManager.RedirectToInvalidUser(UserManager, HttpContext);
+            return;
+        }
+
+        username = await UserManager.GetUserNameAsync(user);
+        createdAtText = user.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+        Input.DisplayName ??= user.DisplayName;
+    }
+
+    private async Task OnValidSubmitAsync()
+    {
+        if (user is null)
+        {
+            RedirectManager.RedirectToInvalidUser(UserManager, HttpContext);
+            return;
+        }
+
+        var newName = string.IsNullOrWhiteSpace(Input.DisplayName) ? null : Input.DisplayName.Trim();
+        if (newName != user.DisplayName)
+        {
+            user.DisplayName = newName;
+            var result = await UserManager.UpdateAsync(user);
+            if (!result.Succeeded)
+            {
+                RedirectManager.RedirectToCurrentPageWithStatus(
+                    $"Error: 保存失败：{string.Join("；", result.Errors.Select(e => e.Description))}",
+                    HttpContext);
+                return;
+            }
+        }
+
+        await SignInManager.RefreshSignInAsync(user);
+        RedirectManager.RedirectToCurrentPageWithStatus("已保存你的称呼", HttpContext);
+    }
+
+    private sealed class InputModel
+    {
+        [StringLength(30, ErrorMessage = "称呼最多 30 个字")]
+        [Display(Name = "称呼")]
+        public string? DisplayName { get; set; }
+    }
+}

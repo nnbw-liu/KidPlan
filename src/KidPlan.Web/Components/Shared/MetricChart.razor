@@ -1,0 +1,99 @@
+@* 一张成长曲线图。
+   - 分图模式：每张图一条线（量纲一致，读数准）；
+   - 叠加模式：一张图多条线（日期轴已经对齐）。
+   两种模式都收敛到这个组件，切图表库（ApexCharts / ECharts）时也只改这一个文件。 *@
+
+<MudPaper Elevation="0" Class="pa-2">
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <MudText Typo="Typo.subtitle2">@Title <span class="text-muted-sm">@Unit</span></MudText>
+        @if (!string.IsNullOrWhiteSpace(Hint))
+        {
+            <MudText Typo="Typo.caption" Class="text-muted-sm">@Hint</MudText>
+        }
+    </div>
+
+    @if (Labels.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Class="text-muted-sm py-6">还没有数据，记录一次就会出现曲线。</MudText>
+    }
+    else if (Labels.Count == 1)
+    {
+        <MudText Typo="Typo.body2" Class="text-muted-sm py-2">
+            目前只有 1 个数据点（@Labels[0]），再记录一次就能画出趋势。
+        </MudText>
+    }
+    else
+    {
+        <MudChart T="double"
+                  ChartType="ChartType.Line"
+                  ChartSeries="_series"
+                  ChartLabels="Labels.ToArray()"
+                  ChartOptions="_options"
+                  Width="100%"
+                  Height="@Height"
+                  CanHideSeries="false" />
+
+        @* 食欲 / 精神这类枚举指标画出来是 1~4 的阶梯。
+           MudChart 的 Y 轴刻度只支持数值间隔，塞不进文字，
+           所以把「数字 → 档位」的对照放在图下面，比硬改刻度更省事也更清楚。 *@
+        @if (TickLabels is { Length: > 1 })
+        {
+            <MudText Typo="Typo.caption" Class="text-muted-sm mt-1">
+                Y 轴档位：
+                @string.Join(" · ", TickLabels
+                    .Select((text, index) => (text, index))
+                    .Where(t => t.index > 0 && !string.IsNullOrWhiteSpace(t.text))
+                    .Select(t => $"{t.index} {t.text}"))
+            </MudText>
+        }
+    }
+</MudPaper>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public string Unit { get; set; } = string.Empty;
+
+    /// <summary>X 轴标签。分图时是某个指标自己的测量日期；叠加时是所有指标日期的并集。</summary>
+    [Parameter, EditorRequired]
+    public IReadOnlyList<string> Labels { get; set; } = [];
+
+    /// <summary>要画的线。</summary>
+    [Parameter, EditorRequired]
+    public IReadOnlyList<ChartLine> Lines { get; set; } = [];
+
+    /// <summary>档位文案（食欲 / 精神状态这种枚举指标用），下标即数值。</summary>
+    [Parameter]
+    public string[]? TickLabels { get; set; }
+
+    [Parameter]
+    public string Height { get; set; } = "240px";
+
+    /// <summary>标题右边的一句说明，例如「归一化后只比走势」。</summary>
+    [Parameter]
+    public string? Hint { get; set; }
+
+    private List<ChartSeries<double>> _series = [];
+    private LineChartOptions _options = new();
+
+    protected override void OnParametersSet()
+    {
+        _series = Lines
+            .Select(line => new ChartSeries<double>
+            {
+                Name = line.Name,
+                Data = line.Values.ToList(),
+            })
+            .ToList();
+
+        // 枚举指标：刻度间隔固定 1，免得 MudChart 自己挑出 0.5 这种没有意义的档位。
+        _options = new LineChartOptions();
+
+        if (TickLabels is { Length: > 1 })
+        {
+            _options.YAxisTicks = 1;
+        }
+    }
+}

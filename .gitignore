@@ -1,0 +1,39 @@
+# ---- .NET ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+*.nupkg
+TestResults/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+
+# ---- 敏感配置：数据库密码等，绝对不能提交 ----
+.env
+*.env.local
+appsettings.Local.json
+appsettings.*.Local.json
+
+# 全局模型配置：填了真实 API 密钥之后它就是机密。
+# 仓库里只保留带注释的模板 config/ai.example.json；
+# 应用首次启动会自己生成 config/ai.json，所以不复制模板也能跑起来。
+#
+# 带斜杠的模式会被锚定到 .gitignore 所在目录，所以光写 config/ai.json
+# 只挡得住仓库根目录那一份；开发时内容根目录是 src/KidPlan.Web，
+# 应用会在 src/KidPlan.Web/config/ai.json 另外生成一份，必须用 **/ 才能覆盖。
+config/ai.json
+**/config/ai.json
+
+# ---- 本地数据库与备份 ----
+*.db
+*.db-shm
+*.db-wal
+backups/
+
+# ---- 部署/系统 ----
+.DS_Store
+Thumbs.db
+*.log

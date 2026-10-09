@@ -1,0 +1,32 @@
+@page "/Error"
+@using System.Diagnostics
+@layout KidPlan.Web.Components.Layout.MainLayout
+
+<PageTitle>出错了 · KidPlan</PageTitle>
+
+<MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-4">
+    处理你的请求时发生了错误。可以返回首页重试，或者联系管理员查看服务器日志。
+</MudAlert>
+
+@if (ShowRequestId)
+{
+    <p class="text-muted-sm">
+        请求编号（排查日志时提供给管理员）：<code>@RequestId</code>
+    </p>
+}
+
+<a href="/" class="auth-btn" style="display:inline-block;text-decoration:none;max-width:220px;text-align:center">
+    返回首页
+</a>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

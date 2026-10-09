@@ -1,0 +1,593 @@
+@page "/children/{ChildId:int}/meal-history"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject IMealService MealService
+@inject CurrentChildState CurrentChild
+@inject NavigationManager NavigationManager
+
+<PageTitle>餐饮记录 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_child is null)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    @* ---------------- 头部 ---------------- *@
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <span style="font-size:2rem;line-height:1">@(_child.AvatarEmoji ?? Ui.GenderEmoji(_child.Gender))</span>
+        <MudText Typo="Typo.h5">@_child.Alias 的餐饮记录</MudText>
+        <MudSpacer />
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Restaurant"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meals"))">
+            去安排饮食
+        </MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+        @_ageText · 这里回顾以前吃过什么：按周或按月看每天的菜单和汇总
+    </MudText>
+
+    @* ---------------- 范围切换 ---------------- *@
+    <MudPaper Elevation="0" Class="pa-3 mb-4">
+        <div class="d-flex align-center flex-wrap gap-2">
+            <MudButtonGroup Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary">
+                @foreach (var option in ModeOptions)
+                {
+                    <MudButton Color="@(_mode == option.Mode ? Color.Primary : Color.Default)"
+                               Variant="@(_mode == option.Mode ? Variant.Filled : Variant.Outlined)"
+                               StartIcon="@option.Icon"
+                               OnClick="@(() => SetMode(option.Mode))">
+                        @option.Label
+                    </MudButton>
+                }
+            </MudButtonGroup>
+
+            <MudSpacer />
+
+            <MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" title="上一段" OnClick="@(() => ShiftAsync(-1))" />
+            <MudText Typo="Typo.body1" Class="mx-1" Style="white-space:nowrap">@RangeLabel</MudText>
+            <MudIconButton Icon="@Icons.Material.Filled.ChevronRight" title="下一段" OnClick="@(() => ShiftAsync(1))" />
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="JumpToTodayAsync">回到今天</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text"
+                       StartIcon="@Icons.Material.Filled.Refresh" OnClick="RefreshAsync">
+                刷新状态
+            </MudButton>
+        </div>
+    </MudPaper>
+
+    @* ---------------- 汇总 ---------------- *@
+    <MudPaper Elevation="1" Class="pa-4 mb-4">
+        <MudText Typo="Typo.subtitle2" Class="mb-3">@SummaryTitle</MudText>
+
+        @if (_summary.IsEmpty)
+        {
+            <MudText Typo="Typo.body2" Class="text-muted-sm">
+                这段时间一条餐饮安排都没有。
+            </MudText>
+        }
+        else
+        {
+            <MudGrid>
+                <MudItem xs="6" md="3">
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">记录天数</MudText>
+                    <MudText Typo="Typo.h6">@_summary.RecordedDayCount / @_summary.Days.Count 天</MudText>
+                    @if (_summary.MissingDayCount > 0)
+                    {
+                        <MudText Typo="Typo.caption" Style="color:#b3252a">@_summary.MissingDayCount 天没有记录</MudText>
+                    }
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">
+                        固定三餐 @_summary.FixedMeals 顿 · 点心零食 @_summary.AdHocMeals 顿
+                    </MudText>
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">已吃完</MudText>
+                    <MudText Typo="Typo.h6">@_summary.EatenMeals / @_summary.TotalMeals 餐</MudText>
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">
+                        跳过 @_summary.SkippedMeals · 待确认 @_summary.UnconfirmedMeals
+                    </MudText>
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">热量（已吃 / 计划）</MudText>
+                    <MudText Typo="Typo.h6">@_summary.EatenCalories / @_summary.PlannedCalories 千卡</MudText>
+                    @if (AverageCaloriesText is not null)
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">@AverageCaloriesText</MudText>
+                    }
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">涉及过敏食物</MudText>
+                    <MudText Typo="Typo.h6" Style="@(_summary.AllergenRiskHits.Count > 0 ? "color:#b3252a" : null)">
+                        @_summary.AllergenRiskHits.Count 餐
+                    </MudText>
+                    @if (_summary.AllergenRiskHits.Count == 0)
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">这段时间没有命中</MudText>
+                    }
+                    else if (_summary.AllergyHits.Count > 0)
+                    {
+                        <MudText Typo="Typo.caption" Style="color:#b3252a">
+                            其中 @_summary.AllergyHits.Count 餐还没确认过风险
+                        </MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">都已确认过风险</MudText>
+                    }
+                </MudItem>
+            </MudGrid>
+
+            @if (_summary.TotalMeals > 0)
+            {
+                <MudProgressLinear Color="Color.Success"
+                                   Value="@(_summary.EatenMeals * 100.0 / _summary.TotalMeals)"
+                                   Class="mt-3" />
+            }
+        }
+    </MudPaper>
+
+    @* ---------------- 过敏命中清单 ---------------- *@
+    @if (_summary.AllergyHits.Count > 0)
+    {
+        <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-4">
+            <strong>⚠️ 有 @_summary.AllergyHits.Count 餐命中了中等以上的过敏原，还没确认过风险</strong>
+            <div style="margin-top:4px">
+                @foreach (var hit in _summary.AllergyHits)
+                {
+                    <div class="text-muted-sm">
+                        · @hit.Date.ToString("MM-dd") @hit.Meal.Meal.MealType.ToChinese()「@hit.Meal.Meal.Menu」
+                        —— @Ui.AllergyIcon(hit.Match.Severity) @hit.Match.Allergen
+                        （@hit.Match.Severity.ToChinese()，命中「@hit.Match.MatchedKeyword」）
+                    </div>
+                }
+            </div>
+            <div class="text-muted-sm" style="margin-top:4px">
+                这些多半是「安排之后才把某种食物登记成过敏」造成的，去饮食页核对一下。
+            </div>
+        </MudAlert>
+    }
+
+    @if (EscalatedMeals.Count > 0)
+    {
+        <MudAlert Severity="Severity.Error" Variant="Variant.Filled" Class="mb-4">
+            <strong>🚨 有 @EscalatedMeals.Count 餐的过敏等级后来被调高了，原来的确认已经不算数</strong>
+            <div style="margin-top:4px">
+                @foreach (var meal in EscalatedMeals)
+                {
+                    <div class="text-muted-sm">
+                        · @meal.Meal.Date.ToString("MM-dd") @meal.Meal.MealType.ToChinese()「@meal.Meal.Menu」
+                        —— 安排时按「@(meal.Meal.AllergyAcknowledgedMaxSeverity?.ToChinese())」确认的，
+                        现在已经是「@meal.MaxSeverity?.ToChinese()」
+                    </div>
+                }
+            </div>
+            <div class="text-muted-sm" style="margin-top:4px">
+                这一条只有分级之后才看得出来：以前只记「确认过一次」，
+                等级提高了也发现不了。请逐条重新看一下要不要保留这些安排。
+            </div>
+        </MudAlert>
+    }
+
+    @if (AcknowledgedRiskHits.Count > 0)
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-4">
+            <strong>📌 另有 @AcknowledgedRiskHits.Count 餐含过敏食物，但安排时你已确认过风险</strong>
+            <div style="margin-top:4px">
+                @foreach (var hit in AcknowledgedRiskHits)
+                {
+                    <div class="text-muted-sm">
+                        · @hit.Date.ToString("MM-dd") @hit.Meal.Meal.MealType.ToChinese()「@hit.Meal.Meal.Menu」
+                        —— 含 @hit.Match.Allergen（@hit.Match.Severity.ToChinese()）
+                    </div>
+                }
+            </div>
+        </MudAlert>
+    }
+
+    @if (_summary.NoticeHits.Count > 0)
+    {
+        <MudAlert Severity="Severity.Normal" Variant="Variant.Outlined" Class="mb-4">
+            <strong>ℹ️ 有 @_summary.NoticeHits.Count 餐含「不耐受 / 轻微」级别的食物</strong>
+            <div class="text-muted-sm" style="margin-top:4px">
+                这类只做记录、不报警：
+                @string.Join("、", _summary.NoticeHits.Select(h => h.Match.Allergen).Distinct())
+            </div>
+        </MudAlert>
+    }
+
+    @* ---------------- 漏记提醒 ---------------- *@
+    @if (MissingDayRanges.Count > 0)
+    {
+        <MudPaper Elevation="0" Class="pa-3 mb-4">
+            <MudText Typo="Typo.subtitle2" Class="mb-2">
+                🕳️ 这些天没有固定三餐记录（@MissingPastDays.Count 天，合并成 @MissingDayRanges.Count 段）
+            </MudText>
+            <div class="d-flex flex-wrap gap-1">
+                @foreach (var range in MissingDayRanges.Take(MaxMissingChips))
+                {
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined"
+                             OnClick="@(() => GoToPlanDay(range.From))">
+                        @if (range.Days == 1)
+                        {
+                            @range.From.ToString("MM-dd ddd")
+                        }
+                        else
+                        {
+                            @($"{range.From:MM-dd} ~ {range.To:MM-dd}（{range.Days} 天）")
+                        }
+                    </MudChip>
+                }
+                @if (MissingDayRanges.Count > MaxMissingChips)
+                {
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default">
+                        还有 @(MissingDayRanges.Count - MaxMissingChips) 段没列出来
+                    </MudChip>
+                }
+            </div>
+            <MudText Typo="Typo.caption" Class="text-muted-sm mt-2">
+                点某一段可以回到「饮食安排」补录那天的第一日；如果那段时间本来就没在记录，忽略即可。
+                只记了点心 / 零食的日子不算漏记。
+            </MudText>
+        </MudPaper>
+    }
+
+    @* ---------------- 每天明细 ---------------- *@
+    @if (_summary.IsEmpty)
+    {
+        <MudPaper Elevation="0" Class="pa-8 text-center">
+            <MudText Typo="Typo.body1" Class="mb-1">这段时间没有安排</MudText>
+            <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+                换一个时间段看看，或者先去「饮食安排」记一餐。
+            </MudText>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                       StartIcon="@Icons.Material.Filled.Restaurant"
+                       OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meals"))">
+                去安排饮食
+            </MudButton>
+        </MudPaper>
+    }
+    else
+    {
+        @foreach (var day in _summary.Days)
+        {
+            if (day.IsEmpty)
+            {
+                continue;
+            }
+
+            var isToday = day.Date == _today;
+
+            <MudPaper Elevation="1" Class="pa-4 mb-3">
+                <div class="d-flex align-center flex-wrap gap-2">
+                    <MudText Typo="Typo.subtitle1">@day.Date.ToString("MM-dd dddd")</MudText>
+                    @if (isToday)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Filled">今天</MudChip>
+                    }
+                    <MudSpacer />
+                    <MudText Typo="Typo.caption" Class="text-muted-sm">
+                        已吃 @day.EatenCount / @day.TotalCount 餐 · @day.EatenCalories / @day.PlannedCalories 千卡
+                    </MudText>
+                </div>
+
+                <MudDivider Class="my-3" />
+
+                @foreach (var item in day.Meals)
+                {
+                    var meal = item.Meal;
+
+                    <div class="d-flex align-start flex-wrap gap-2 mb-2">
+                        <span style="font-size:1.25rem;line-height:1.6">@Ui.MealTypeEmoji(meal.MealType)</span>
+                        <div style="flex:1;min-width:200px">
+                            <div class="d-flex align-center flex-wrap gap-2">
+                                <MudText Typo="Typo.body2">@meal.MealType.ToChinese() · @(meal.PlannedTime?.ToString("HH:mm") ?? "未定时点")</MudText>
+                                <MudChip T="string" Size="Size.Small"
+                                         Color="@Ui.MealStateColor(item.State)"
+                                         Variant="@Ui.MealStateVariant(item.State)">
+                                    @item.State.ToChinese()
+                                </MudChip>
+                                @if (meal.CreatedFromAiSuggestion)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">AI 推荐</MudChip>
+                                }
+                                @if (meal.EstimatedCalories is { } calories)
+                                {
+                                    <MudText Typo="Typo.caption" Class="text-muted-sm">@calories 千卡</MudText>
+                                }
+                            </div>
+                            <MudText Typo="Typo.body1">@meal.Menu</MudText>
+                            @if (!string.IsNullOrWhiteSpace(meal.Foods))
+                            {
+                                <MudText Typo="Typo.caption" Class="text-muted-sm">食材：@meal.Foods</MudText>
+                            }
+                            <MudText Typo="Typo.caption" Class="text-muted-sm">@item.StateText</MudText>
+                            @if (!string.IsNullOrWhiteSpace(meal.FinishNote))
+                            {
+                                <MudText Typo="Typo.caption" Class="text-muted-sm">吃完情况：@meal.FinishNote</MudText>
+                            }
+                            @if (item.PendingRiskMatches.Count > 0)
+                            {
+                                <MudText Typo="Typo.caption" Style="color:#b3252a">
+                                    @Ui.AllergyIcon(item.MaxSeverity ?? AllergySeverity.Moderate) 可能含过敏食物：
+                                    @string.Join("、", item.PendingRiskMatches.Select(m => $"{m.Allergen}（{m.Severity.ToChinese()}，命中「{m.MatchedKeyword}」）"))
+                                </MudText>
+                            }
+                            else if (item.ContainsAllergen)
+                            {
+                                <MudText Typo="Typo.caption" Class="text-muted-sm">
+                                    @Ui.AllergyIcon(item.MaxSeverity ?? AllergySeverity.Mild) 含：
+                                    @string.Join("、", item.AllergenMatches.Select(m => $"{m.Allergen}（{m.Severity.ToChinese()}）"))
+                                    @if (meal.AllergyWarningAcknowledged)
+                                    {
+                                        <span>· 安排时已确认风险</span>
+                                    }
+                                </MudText>
+                            }
+                        </div>
+                        @if (isToday)
+                        {
+                            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Edit" title="去安排页修改"
+                                           OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meals?date={day.Date:yyyy-MM-dd}"))" />
+                        }
+                    </div>
+                }
+            </MudPaper>
+        }
+
+        <MudText Typo="Typo.caption" Class="text-muted-sm mt-2">
+            「未到饭点 / 用餐中 / 已过饭点」都是按当前时间自动算的；本周之前的日子如果还没确认，
+            会一直显示「已过饭点·待确认」，需要到「饮食安排」里点一下确认或跳过。
+        </MudText>
+    }
+}
+
+@code {
+    private enum HistoryMode
+    {
+        Week = 0,
+        Month = 1,
+        All = 2,
+    }
+
+    private static readonly (HistoryMode Mode, string Label, string Icon)[] ModeOptions =
+    [
+        (HistoryMode.Week, "按周", Icons.Material.Filled.ViewWeek),
+        (HistoryMode.Month, "按月", Icons.Material.Filled.CalendarMonth),
+        (HistoryMode.All, "全部", Icons.Material.Filled.History),
+    ];
+
+    private bool _loading = true;
+    private Child? _child;
+    private string _ageText = string.Empty;
+    private DateOnly _today = DateOnly.FromDateTime(DateTime.Today);
+    private DateOnly _anchor = DateOnly.FromDateTime(DateTime.Today);
+    private HistoryMode _mode = HistoryMode.Week;
+
+    /// <summary>
+    /// 「漏记提醒」最多渲染几段。
+    /// 一天的缺失合并成一段之后通常没几条，但万一真的一年没记，这里也不至于又堆出几百个组件。
+    /// </summary>
+    private const int MaxMissingChips = 24;
+    private DateOnly? _earliestMealDate;
+    private MealRangeSummary _summary = new(DateOnly.FromDateTime(DateTime.Today), DateOnly.FromDateTime(DateTime.Today), []);
+
+    /// <summary>缓存的派生清单。区间可能有好几百天，模板里反复读属性时不该每次都重算。</summary>
+    private IReadOnlyList<(DateOnly Date, MealWithState Meal, AllergyMatch Match)>? _acknowledgedRiskHits;
+    private IReadOnlyList<MealWithState>? _escalatedMeals;
+
+    [Parameter]
+    public int ChildId { get; set; }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private (DateOnly From, DateOnly To) ComputeRange()
+    {
+        switch (_mode)
+        {
+            case HistoryMode.Month:
+                return (new DateOnly(_anchor.Year, _anchor.Month, 1),
+                    new DateOnly(_anchor.Year, _anchor.Month, DateTime.DaysInMonth(_anchor.Year, _anchor.Month)));
+
+            case HistoryMode.All:
+                // 「全部」= 从最早一条安排起，但**必须有上界**。
+                //
+                // 这里以前写的是 new DateOnly(1900, 1, 1)，而区间是按天展开成 MealDaySummary 的，
+                // 于是点一下「全部」就生成四万多个对象，紧接着「漏记提醒」再为每个空白天渲染一个
+                // MudChip —— 四万多个组件，浏览器标签页直接卡死（这就是之前那次闪退）。
+                // 现在：起点取最早记录，且无论如何不超过 MealService.MaxRangeDays 天。
+                var earliest = _earliestMealDate ?? _today;
+                var floor = _today.AddDays(-(KidPlan.Web.Services.MealService.MaxRangeDays - 1));
+                return (earliest < floor ? floor : earliest, _today);
+
+            // 按周：以周一为一周的开始。
+            default:
+                return WeekOf(_anchor);
+        }
+    }
+
+    private static (DateOnly From, DateOnly To) WeekOf(DateOnly date)
+    {
+        var offset = ((int)date.DayOfWeek + 6) % 7;   // 周一 = 0
+        var from = date.AddDays(-offset);
+        return (from, from.AddDays(6));
+    }
+
+    private string RangeLabel => _mode switch
+    {
+        HistoryMode.Month => _anchor.ToString("yyyy 年 M 月"),
+        HistoryMode.All => $"{_summary.From:yyyy-MM-dd} ~ {_summary.To:MM-dd}",
+        _ => IsCurrentWeek ? "本周" : $"{_summary.From:MM-dd} ~ {_summary.To:MM-dd}",
+    };
+
+    private bool IsCurrentWeek
+    {
+        get
+        {
+            var (from, to) = WeekOf(_today);
+            return _summary.From == from && _summary.To == to;
+        }
+    }
+
+    private string SummaryTitle => _mode switch
+    {
+        HistoryMode.Month => $"{_anchor:yyyy 年 M 月}汇总",
+        HistoryMode.All => "全部记录汇总",
+        _ => IsCurrentWeek ? "本周汇总" : $"{_summary.From:MM-dd} ~ {_summary.To:MM-dd} 汇总",
+    };
+
+    private string? AverageCaloriesText
+    {
+        get
+        {
+            var days = _summary.RecordedDayCount;
+            return days == 0 ? null : $"平均每天 {_summary.EatenCalories / days} 千卡";
+        }
+    }
+
+    /// <summary>
+    /// 区间里“已经过去、却连固定三餐都没有安排”的日子——这些才是真正漏记的。
+    ///
+    /// 只排了点心 / 零食不算「这天记过了」：加餐本来就是可记可不记的，
+    /// 拿它当漏记的判据，只会把「只记了一顿零食」的日子也算成合格，反而更乱。
+    /// </summary>
+    private IReadOnlyList<DateOnly> MissingPastDays =>
+        _summary.Days.Where(d => !d.HasFixedMeals && d.Date < _today).Select(d => d.Date).ToList();
+
+    /// <summary>
+    /// 把连续缺失的日子合并成区间。
+    ///
+    /// 之前是一天一个 chip，一年下来就是几百个组件——这正是「全部」模式卡死的另一半原因。
+    /// 合并之后通常只剩几行，而且「10-01 ~ 10-07 都没记」比七个单独的 chip 更好读。
+    /// </summary>
+    private IReadOnlyList<(DateOnly From, DateOnly To, int Days)> MissingDayRanges
+    {
+        get
+        {
+            var days = MissingPastDays;
+            var ranges = new List<(DateOnly From, DateOnly To, int Days)>();
+
+            if (days.Count == 0)
+            {
+                return ranges;
+            }
+
+            var start = days[0];
+            var previous = days[0];
+
+            for (var i = 1; i < days.Count; i++)
+            {
+                if (days[i] == previous.AddDays(1))
+                {
+                    previous = days[i];
+                    continue;
+                }
+
+                ranges.Add((start, previous, previous.DayNumber - start.DayNumber + 1));
+                start = days[i];
+                previous = days[i];
+            }
+
+            ranges.Add((start, previous, previous.DayNumber - start.DayNumber + 1));
+            return ranges;
+        }
+    }
+
+    /// <summary>
+    /// 含过敏食物、但安排时家长已经点过“我知道风险”的餐次。
+    /// 这些刻意不算警告（同一餐不该天天报警），可是回顾时仍然值得看一眼吃过什么。
+    /// </summary>
+    private IReadOnlyList<(DateOnly Date, MealWithState Meal, AllergyMatch Match)> AcknowledgedRiskHits =>
+        _acknowledgedRiskHits ??= _summary.Days
+            .SelectMany(d => d.Meals
+                .Where(m => m.Meal.AllergyWarningAcknowledged)
+                .SelectMany(m => m.AllergenMatches.Select(match => (d.Date, m, match))))
+            .ToList();
+
+    /// <summary>
+    /// 等级后来被调高了、原来的确认已经不算数的餐次。
+    /// 这是分级带来的新情况：安排时只是「中等」，之后家长把某个食材改成「强过敏」，
+    /// 那顿旧安排就值得重新看一眼——只存一个 bool 是发现不了的。
+    /// </summary>
+    private IReadOnlyList<MealWithState> EscalatedMeals =>
+        _escalatedMeals ??= _summary.Days
+            .SelectMany(d => d.Meals.Where(m => m.IsAllergenEscalated))
+            .ToList();
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        _child = await ChildService.FindAsync(ChildId, userId);
+        if (_child is null)
+        {
+            _loading = false;
+            return;
+        }
+
+        CurrentChild.Select(_child.Id);
+
+        _today = DateOnly.FromDateTime(DateTime.Today);
+        _ageText = AgeCalculator.Describe(_child.BirthDate, _today);
+        _earliestMealDate = await MealService.GetEarliestMealDateAsync(userId, ChildId);
+
+        await RefreshSummaryAsync(userId);
+        _loading = false;
+    }
+
+    private async Task RefreshSummaryAsync(string userId)
+    {
+        var (from, to) = ComputeRange();
+        _summary = await MealService.GetRangeAsync(userId, ChildId, from, to);
+
+        // 派生清单跟着区间变，缓存必须一起失效，否则「全部」切回「本周」会残留上一段的数据。
+        _acknowledgedRiskHits = null;
+        _escalatedMeals = null;
+    }
+
+    private async Task RefreshAsync()
+    {
+        await RefreshSummaryAsync(await GetUserIdAsync());
+        StateHasChanged();
+    }
+
+    private async Task SetModeAsync(HistoryMode mode)
+    {
+        _mode = mode;
+        _anchor = _today;
+        await RefreshAsync();
+    }
+
+    private void SetMode(HistoryMode mode) => _ = SetModeAsync(mode);
+
+    private async Task ShiftAsync(int direction)
+    {
+        _anchor = _mode switch
+        {
+            HistoryMode.Month => new DateOnly(_anchor.Year, _anchor.Month, 1).AddMonths(direction),
+            HistoryMode.All => _today,
+            _ => _anchor.AddDays(7 * direction),
+        };
+
+        await RefreshAsync();
+    }
+
+    private async Task JumpToTodayAsync()
+    {
+        _anchor = _today;
+        await RefreshAsync();
+    }
+
+    private void GoToPlanDay(DateOnly date)
+        => NavigationManager.NavigateTo($"/children/{ChildId}/meals?date={date:yyyy-MM-dd}");
+}

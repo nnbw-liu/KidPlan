@@ -1,0 +1,26 @@
+@inject NavigationManager NavigationManager
+
+<nav class="manage-nav">
+    <ul>
+        <li>
+            <a href="/account/manage" class="@IsActive("/account/manage")">账号资料</a>
+        </li>
+        <li>
+            <a href="/account/manage/changepassword" class="@IsActive("/account/manage/changepassword")">修改密码</a>
+        </li>
+        <li>
+            <a href="/children">小孩管理</a>
+        </li>
+        <li>
+            <a href="/">返回首页</a>
+        </li>
+    </ul>
+</nav>
+
+@code {
+    private string IsActive(string path)
+    {
+        var current = NavigationManager.ToBaseRelativePath(NavigationManager.Uri).Trim('/').ToLowerInvariant();
+        return current == path.Trim('/').ToLowerInvariant() ? "active" : string.Empty;
+    }
+}

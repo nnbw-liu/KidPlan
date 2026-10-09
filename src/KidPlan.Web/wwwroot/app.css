@@ -1,0 +1,124 @@
+/* KidPlan 全局样式。
+   注意：这里刻意不引入 Bootstrap，也不从 Google Fonts 加载字体
+   （国内服务器访问 Google 会超时，字体统一走系统字体栈）。 */
+
+html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+}
+
+h1:focus {
+    outline: none;
+}
+
+/* 表单校验（原生控件用得到） */
+.invalid {
+    outline: 1px solid #e5484d;
+}
+
+.validation-message {
+    color: #e5484d;
+    font-size: .83rem;
+    margin-top: 4px;
+}
+
+/* Blazor 未处理错误的底部提示条。
+   原先放在 MainLayout.razor.css（scoped），改用 MudBlazor 布局后挪到这里做全局样式。 */
+#blazor-error-ui {
+    color-scheme: light only;
+    background: #fff8d6;
+    bottom: 0;
+    box-shadow: 0 -1px 4px rgba(0, 0, 0, .18);
+    box-sizing: border-box;
+    display: none;
+    left: 0;
+    padding: .7rem 1.25rem;
+    position: fixed;
+    width: 100%;
+    z-index: 2000;
+    font-size: .92rem;
+    color: #5c4b00;
+}
+
+#blazor-error-ui .reload {
+    color: #b3252a;
+    margin-left: .5rem;
+}
+
+#blazor-error-ui .dismiss {
+    cursor: pointer;
+    position: absolute;
+    right: .8rem;
+    top: .5rem;
+}
+
+/* 抽屉里的导航占满高度，把退出登录推到底部 */
+.mud-drawer-content {
+    display: flex;
+    flex-direction: column;
+}
+
+/* 页面主体与顶部 AppBar / 侧边抽屉的间距。
+   必须用 !important：MudBlazor 自带的 `.mud-main-content{padding-top:calc(var(--mud-appbar-height)...)}`
+   会被同样带 !important 的 MudBlazor 间距工具类（.pa-* / .px-* 等）整条覆盖，
+   一旦覆盖，padding-top 就退回 0，每个页面的 header 都会被顶部标题栏压住。 */
+.main-content {
+    padding: 16px !important;
+    padding-top: calc(var(--mud-appbar-height) + 8px) !important;
+}
+
+@media (max-width: 600px) {
+    .main-content {
+        padding: 12px !important;
+        padding-top: calc(var(--mud-appbar-height) + 4px) !important;
+    }
+}
+
+/* 让成长曲线的卡片在移动端也能横向滚动查看 */
+.chart-scroll {
+    width: 100%;
+    overflow-x: auto;
+}
+
+/* 通用小字提示 */
+.text-muted-sm {
+    font-size: .82rem;
+    color: #6b7385;
+    line-height: 1.6;
+}
+
+/* 头像 emoji 选择器（小孩登记页） */
+.emoji-pick {
+    width: 44px;
+    height: 44px;
+    font-size: 1.4rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #f5f7fb;
+    border: 2px solid transparent;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, transform .08s;
+    padding: 0;
+}
+
+.emoji-pick:hover {
+    background: #eef3ff;
+    transform: translateY(-1px);
+}
+
+.emoji-pick-active {
+    border-color: #4c7df0;
+    background: #eef3ff;
+}
+
+/* 表格里的紧凑按钮不要撑高行 */
+.mud-simple-table td .mud-icon-button {
+    margin: -4px 0;
+}
+

@@ -1,0 +1,60 @@
+# =============================================================================
+# 构建上下文排除清单
+# 原则：只排除“确定与 dotnet publish 无关”的东西，保守优先，
+#       绝不排除 csproj / 源码 / 迁移文件。
+# 注意：本文件只影响发送给 Docker 守护进程的上下文，不会影响宿主机上的文件。
+# =============================================================================
+
+# --- 版本控制与 IDE ---
+.git
+.gitignore
+.gitattributes
+.vs
+.vscode
+.idea
+**/*.user
+**/*.suo
+
+# --- .NET 构建产物（容器内会重新 restore / build，必须排除以便层缓存生效）---
+**/bin
+**/obj
+**/TestResults
+**/.vs
+
+# --- 本地数据库文件（Sqlite 残留或开发用临时库）---
+**/app.db
+**/Data/app.db
+**/*.db-shm
+**/*.db-wal
+
+# --- 前端依赖（本项目为 Blazor Server，正常不会有，防御性排除）---
+**/node_modules
+
+# --- 部署期产生的敏感/无关文件（防止误打进镜像）---
+.env
+.env.*
+!.env.example
+deploy/backups
+backups
+**/*.log
+
+# --- 全局模型配置：里面可能填了真实 API 密钥 ---
+# 运行期通过 docker-compose 的 ./config:/app/config 挂载进容器，
+# 不需要进入构建上下文（否则 COPY . . 会把它带进构建缓存层）。
+config
+
+# --- 文档与编排文件：构建镜像时用不到，排除后上下文更小 ---
+*.md
+docs
+LICENSE
+docker-compose.yml
+docker-compose.*.yml
+
+# --- 测试工程与解决方案文件：镜像只需要发布 Web 项目 ---
+tests
+*.sln
+*.slnx
+
+# --- 本机验证脚本（注册临时账号、连本机 MySQL、开无头浏览器）---
+# 纯开发期工具，跟发布没有关系。
+scripts

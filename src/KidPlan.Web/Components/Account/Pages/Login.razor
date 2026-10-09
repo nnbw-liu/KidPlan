@@ -1,0 +1,150 @@
+@page "/Account/Login"
+
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Identity
+@using KidPlan.Web.Data
+
+@inject SignInManager<ApplicationUser> SignInManager
+@inject ILogger<Login> Logger
+@inject IdentityRedirectManager RedirectManager
+
+<PageTitle>登录 · KidPlan</PageTitle>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">🌱 KidPlan</div>
+        <p class="auth-sub">记录孩子的成长、身体状态与每一餐</p>
+
+        <StatusMessage Message="@errorMessage" />
+
+        <EditForm Model="Input" method="post" OnValidSubmit="LoginUser" FormName="login">
+            <DataAnnotationsValidator />
+            <ValidationSummary class="auth-validation-summary" role="alert" />
+
+            <div class="auth-field">
+                <label for="Input.Email">邮箱</label>
+                <InputText @bind-Value="Input.Email"
+                           id="Input.Email"
+                           class="auth-input"
+                           autocomplete="username"
+                           placeholder="you@example.com" />
+                <ValidationMessage For="() => Input.Email" class="auth-error" />
+            </div>
+
+            <div class="auth-field">
+                <label for="Input.Password">密码</label>
+                <InputText type="password"
+                           @bind-Value="Input.Password"
+                           id="Input.Password"
+                           class="auth-input"
+                           autocomplete="current-password"
+                           placeholder="请输入密码" />
+                <ValidationMessage For="() => Input.Password" class="auth-error" />
+            </div>
+
+            <label class="auth-checkbox">
+                <InputCheckbox @bind-Value="Input.RememberMe" />
+                记住我（14 天内免登录）
+            </label>
+
+            <button type="submit" class="auth-btn">登录</button>
+        </EditForm>
+
+        @if (needsEmailConfirmation)
+        {
+            @* 开着邮箱确认时，“登不进去”最常见的两个原因：邮箱没确认、忘了密码。 *@
+            <div class="auth-links">
+                <a href="@ResendConfirmationUrl">重新发送确认邮件</a>
+            </div>
+        }
+
+        <div class="auth-links">
+            <div>
+                还没有账号？
+                <a href="@RegisterUrl">立即注册</a>
+            </div>
+            <div style="margin-top:6px">
+                <a href="Account/ForgotPassword">忘记密码了？</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private string? errorMessage;
+    private bool needsEmailConfirmation;
+
+    [SupplyParameterFromForm]
+    private InputModel Input { get; set; } = default!;
+
+    [SupplyParameterFromQuery]
+    private string? ReturnUrl { get; set; }
+
+    private string RegisterUrl =>
+        string.IsNullOrEmpty(ReturnUrl)
+            ? "Account/Register"
+            : $"Account/Register?returnUrl={Uri.EscapeDataString(ReturnUrl)}";
+
+    private string ResendConfirmationUrl =>
+        $"Account/ResendEmailConfirmation?email={Uri.EscapeDataString(Input.Email)}";
+
+    protected override void OnInitialized()
+    {
+        Input ??= new();
+    }
+
+    private async Task LoginUser()
+    {
+        needsEmailConfirmation = false;
+
+        var result = await SignInManager.PasswordSignInAsync(
+            Input.Email,
+            Input.Password,
+            Input.RememberMe,
+            lockoutOnFailure: false);
+
+        if (result.Succeeded)
+        {
+            Logger.LogInformation("用户 {Email} 登录成功。", Input.Email);
+            RedirectManager.RedirectTo(ReturnUrl);
+            return;
+        }
+
+        if (result.RequiresTwoFactor)
+        {
+            // 本项目没有启用二次验证，正常不会走到这里。
+            errorMessage = "该账号启用了二次验证，但本系统未开启对应功能。";
+            return;
+        }
+
+        if (result.IsLockedOut)
+        {
+            Logger.LogWarning("账号 {Email} 已被锁定。", Input.Email);
+            RedirectManager.RedirectTo("Account/Lockout");
+            return;
+        }
+
+        if (result.IsNotAllowed)
+        {
+            // 开启邮箱确认后，IsNotAllowed 基本就是“邮箱还没确认”。
+            errorMessage = "该账号还不能登录：需要先完成邮箱确认。";
+            needsEmailConfirmation = true;
+            return;
+        }
+
+        errorMessage = "邮箱或密码不正确，请重试。";
+    }
+
+    private sealed class InputModel
+    {
+        [Required(ErrorMessage = "请输入邮箱")]
+        [EmailAddress(ErrorMessage = "邮箱格式不正确")]
+        public string Email { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "请输入密码")]
+        [DataType(DataType.Password)]
+        public string Password { get; set; } = string.Empty;
+
+        public bool RememberMe { get; set; } = true;
+    }
+}

@@ -1,0 +1,438 @@
+@page "/children/{ChildId:int}/allergens"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IChildService ChildService
+@inject ISnackbar Snackbar
+@inject NavigationManager NavigationManager
+
+<PageTitle>过敏原管理 · KidPlan</PageTitle>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else if (_child is null)
+{
+    <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+        找不到这个小孩，可能已经被删除了，或者不属于当前账号。
+    </MudAlert>
+    <MudButton Href="/children" Variant="Variant.Filled" Color="Color.Primary">返回小孩管理</MudButton>
+}
+else
+{
+    <div class="d-flex align-center flex-wrap gap-2 mb-1">
+        <span style="font-size:2rem;line-height:1">@(_child.AvatarEmoji ?? Ui.GenderEmoji(_child.Gender))</span>
+        <MudText Typo="Typo.h5">@_child.Alias 的过敏原</MudText>
+        <MudSpacer />
+        <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary"
+                   StartIcon="@Icons.Material.Filled.MonitorHeart"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/body"))">
+            身体管理
+        </MudButton>
+        <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary"
+                   StartIcon="@Icons.Material.Filled.Restaurant"
+                   OnClick="@(() => NavigationManager.NavigateTo($"/children/{ChildId}/meals"))">
+            饮食安排
+        </MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+        等级决定「安排到这一餐时会怎么拦你」，也决定 AI 饮食推荐要回避到什么程度。
+    </MudText>
+
+    @if (ReviewCount > 0)
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-4">
+            <strong>有 @ReviewCount 条是从旧文本迁移过来的，等级是系统替你猜的（默认「强过敏」）</strong>
+            <div class="text-muted-sm" style="margin-top:4px">
+                迁移只能保证不丢数据，猜等级是不行的。请按实际情况逐条确认一下：
+                只是喝了奶拉肚子就选「不耐受」，吃过一口就起疹子才选「强过敏」。
+                改动过等级之后「待复核」标记就会消失。
+            </div>
+        </MudAlert>
+    }
+
+    @if (_message is not null)
+    {
+        <MudAlert Severity="@_messageSeverity" Variant="Variant.Outlined" Class="mb-4">@_message</MudAlert>
+    }
+
+    @* ---------------- 现有过敏原 ---------------- *@
+    <MudText Typo="Typo.h6" Class="mb-2">已登记（@_allergens.Count 条）</MudText>
+
+    @if (_allergens.Count == 0)
+    {
+        <MudPaper Elevation="0" Class="pa-6 text-center mb-4">
+            <MudText Typo="Typo.body2" Class="text-muted-sm">
+                还没有登记任何过敏原。下面加一条吧——没有过敏原的话，饮食安排和 AI 推荐都没法做安全校验。
+            </MudText>
+        </MudPaper>
+    }
+    else
+    {
+        @* 每条过敏原以前是一张 MudPaper（pa-3 + mb-2），再加上 Outlined 的 MudSelect
+           自带的高度，几行下来行距、列距都很空，一屏看不了几条。
+           现在：一组一张纸，组内用细线分隔，名字固定宽度让列对齐，
+           行内的控件都压到「Dense + 紧凑变体」，一行实测 45px（原来 95px 上下）。 *@
+        foreach (var group in AllergenGroups)
+        {
+            <MudText Typo="Typo.subtitle2" Class="mt-3 mb-1">
+                @Ui.AllergyIcon(group.Key) @group.Key.ToChinese()
+                <span class="text-muted-sm">· @group.Key.Describe()（@group.Count() 条）</span>
+            </MudText>
+
+            <MudPaper Elevation="1" Class="mb-3">
+                @{
+                    var first = true;
+                }
+                @foreach (var allergen in group)
+                {
+                    @if (!first)
+                    {
+                        <MudDivider />
+                    }
+                    first = false;
+
+                    <div class="d-flex align-center flex-wrap gap-2 px-2 py-1">
+                        <MudText Typo="Typo.body1" Style="min-width:7.5rem">@allergen.Name</MudText>
+
+                        @if (allergen.Kind == AllergenKind.Other)
+                        {
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">非食物</MudChip>
+                        }
+
+                        @if (allergen.NeedsReview)
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Filled">
+                                待复核
+                            </MudChip>
+                        }
+
+                        @* 等级这个下拉是个「就地改等级」的控件，不是要填的表单项：
+                            用 Text 变体（不是 Outlined）能把每行压到 ~45px，
+                            Outlined + 浮动 label 光控件本身就 48px 起。
+                            前面那个小字「等级」是横向的，不占高度——不然一个纯文本下拉
+                            长得不太像能点，等级就没地方改了。 *@
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">等级</MudText>
+                        <MudSelect T="AllergySeverity" Value="allergen.Severity"
+                                   ValueChanged="@(severity => ChangeSeverityAsync(allergen, severity))"
+                                   Variant="Variant.Text" Dense="true" Margin="Margin.Dense"
+                                   title="等级"
+                                   Style="max-width:7.5rem">
+                            @foreach (var severity in EnumDisplay.AllergySeverityOrder)
+                            {
+                                <MudSelectItem T="AllergySeverity" Value="severity">@severity.ToChinese()</MudSelectItem>
+                            }
+                        </MudSelect>
+
+                        @if (!string.IsNullOrWhiteSpace(allergen.TestResult) || !string.IsNullOrWhiteSpace(allergen.Notes))
+                        {
+                            <MudText Typo="Typo.caption" Class="text-muted-sm" Style="flex:1;min-width:10rem">
+                                @if (!string.IsNullOrWhiteSpace(allergen.TestResult))
+                                {
+                                    <span>检测：@allergen.TestResult　</span>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(allergen.Notes))
+                                {
+                                    <span>@allergen.Notes</span>
+                                }
+                            </MudText>
+                        }
+
+                        <MudSpacer />
+
+                        <MudButton Size="Size.Small" Variant="Variant.Text"
+                                   StartIcon="@Icons.Material.Filled.Edit"
+                                   OnClick="@(() => BeginEdit(allergen))">
+                            备注
+                        </MudButton>
+
+                        @if (_pendingDeleteId == allergen.Id)
+                        {
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Error"
+                                       OnClick="@(() => DeleteAsync(allergen))">
+                                确认删除
+                            </MudButton>
+                            <MudButton Size="Size.Small" Variant="Variant.Text"
+                                       OnClick="@(() => _pendingDeleteId = null)">
+                                取消
+                            </MudButton>
+                        }
+                        else
+                        {
+                            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error"
+                                           title="删除" OnClick="@(() => _pendingDeleteId = allergen.Id)" />
+                        }
+                    </div>
+
+                    @if (_editingId == allergen.Id)
+                    {
+                        <div class="px-2 pb-2">
+                            <MudGrid>
+                                <MudItem xs="12" md="4">
+                                    <MudSelect T="AllergenKind" @bind-Value="_formKind" Label="类别"
+                                               Variant="Variant.Outlined" Dense="true" Margin="Margin.Dense">
+                                        <MudSelectItem T="AllergenKind" Value="AllergenKind.Food">食物</MudSelectItem>
+                                        <MudSelectItem T="AllergenKind" Value="AllergenKind.Other">非食物（药物 / 环境）</MudSelectItem>
+                                    </MudSelect>
+                                </MudItem>
+                                <MudItem xs="12" md="4">
+                                    <MudTextField T="string" @bind-Value="_formTestResult" Label="检测结果（可选）"
+                                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                                  Placeholder="例如：IgE 3 级 / 点刺 ++"
+                                                  MaxLength="200" />
+                                </MudItem>
+                                <MudItem xs="12" md="4">
+                                    <MudTextField T="string" @bind-Value="_formNotes" Label="备注"
+                                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                                  Placeholder="例如：上次吃完 10 分钟起风团"
+                                                  MaxLength="500" />
+                                </MudItem>
+                            </MudGrid>
+                            <div class="d-flex flex-wrap gap-2 mt-2">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary"
+                                           StartIcon="@Icons.Material.Filled.Save"
+                                           OnClick="@(() => SaveEditAsync(allergen))">
+                                    保存
+                                </MudButton>
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="CancelEdit">取消</MudButton>
+                            </div>
+                        </div>
+                    }
+                }
+            </MudPaper>
+        }
+    }
+
+    @* ---------------- 新增 ---------------- *@
+    <MudPaper Elevation="1" Class="pa-4 pa-md-6 mt-4">
+        <MudText Typo="Typo.h6" Class="mb-3">新增过敏原</MudText>
+        <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">
+            可以一次贴一串，用逗号 / 顿号 / 空格分隔都行，例如「牛奶、鸡蛋 花生」。它们会用同一个等级录入。
+        </MudText>
+
+        <MudGrid>
+            <MudItem xs="12" md="6">
+                <MudTextField T="string" @bind-Value="_newNames" Label="过敏原 *"
+                              Variant="Variant.Outlined" Lines="2"
+                              Placeholder="例如：牛奶、鸡蛋、花生"
+                              MaxLength="500" />
+            </MudItem>
+            <MudItem xs="12" md="3">
+                <MudSelect T="AllergenKind" @bind-Value="_newKind" Label="类别" Variant="Variant.Outlined">
+                    <MudSelectItem T="AllergenKind" Value="AllergenKind.Food">食物（会拿菜单比对）</MudSelectItem>
+                    <MudSelectItem T="AllergenKind" Value="AllergenKind.Other">非食物（药物 / 环境）</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="3">
+                <MudSelect T="AllergySeverity" @bind-Value="_newSeverity" Label="等级 *"
+                           Variant="Variant.Outlined"
+                           HelperText="@_newSeverity.Describe()">
+                    @foreach (var severity in EnumDisplay.AllergySeverityOrder)
+                    {
+                        <MudSelectItem T="AllergySeverity" Value="severity">@severity.ToChinese()</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="6">
+                <MudTextField T="string" @bind-Value="_newTestResult" Label="检测结果（可选）"
+                              Variant="Variant.Outlined" MaxLength="200" />
+            </MudItem>
+            <MudItem xs="12" md="6">
+                <MudTextField T="string" @bind-Value="_newNotes" Label="备注（可选）"
+                              Variant="Variant.Outlined" MaxLength="500" />
+            </MudItem>
+        </MudGrid>
+
+        <div class="d-flex flex-wrap gap-2 mt-3">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_saving"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="AddAsync">
+                添加
+            </MudButton>
+        </div>
+    </MudPaper>
+}
+
+@code {
+    private bool _loading = true;
+    private bool _saving;
+    private Child? _child;
+    private IReadOnlyList<ChildAllergen> _allergens = [];
+    private string? _message;
+    private Severity _messageSeverity = Severity.Success;
+    private int? _pendingDeleteId;
+    private int? _editingId;
+
+    private string? _newNames;
+    private AllergenKind _newKind = AllergenKind.Food;
+    private AllergySeverity _newSeverity = AllergySeverity.Moderate;
+    private string? _newNotes;
+    private string? _newTestResult;
+
+    private AllergenKind _formKind = AllergenKind.Food;
+    private string? _formNotes;
+    private string? _formTestResult;
+
+    [Parameter]
+    public int ChildId { get; set; }
+
+    private int ReviewCount => _allergens.Count(a => a.NeedsReview);
+
+    /// <summary>按等级从重到轻分组显示——最该注意的排最上面。</summary>
+    private IEnumerable<IGrouping<AllergySeverity, ChildAllergen>> AllergenGroups =>
+        _allergens.GroupBy(a => a.Severity).OrderByDescending(g => g.Key);
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var userId = await GetUserIdAsync();
+
+        _child = await ChildService.FindAsync(ChildId, userId);
+        if (_child is null)
+        {
+            _loading = false;
+            return;
+        }
+
+        _allergens = await ChildService.ListAllergensAsync(ChildId, userId);
+        _loading = false;
+    }
+
+    private async Task AddAsync()
+    {
+        _message = null;
+
+        var tokens = AllergyMatcher.SplitTokens(_newNames);
+        if (tokens.Count == 0)
+        {
+            _messageSeverity = Severity.Error;
+            _message = "请填写至少一个过敏原。";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var userId = await GetUserIdAsync();
+
+            var added = 0;
+            var failures = new List<string>();
+
+            // 逐条添加而不是一次性插入：这样「牛奶」重复了也不会把「鸡蛋」一起挡掉。
+            foreach (var token in tokens)
+            {
+                try
+                {
+                    await ChildService.AddAllergenAsync(userId, ChildId, new ChildAllergen
+                    {
+                        Name = token,
+                        Kind = _newKind,
+                        Severity = _newSeverity,
+                        Notes = _newNotes,
+                        TestResult = _newTestResult,
+                    });
+                    added++;
+                }
+                catch (ArgumentException ex)
+                {
+                    failures.Add(ex.Message);
+                }
+            }
+
+            await LoadAsync();
+
+            _messageSeverity = failures.Count == 0 ? Severity.Success : Severity.Warning;
+            _message = $"已添加 {added} 条。";
+            if (failures.Count > 0)
+            {
+                _message += string.Join(" ", failures);
+            }
+
+            if (added > 0)
+            {
+                _newNames = null;
+                _newNotes = null;
+                _newTestResult = null;
+                Snackbar.Add($"已添加 {added} 条过敏原", Severity.Success);
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ChangeSeverityAsync(ChildAllergen allergen, AllergySeverity severity)
+    {
+        if (allergen.Severity == severity)
+        {
+            return;
+        }
+
+        var userId = await GetUserIdAsync();
+
+        await ChildService.UpdateAllergenAsync(userId, allergen.Id, new ChildAllergen
+        {
+            Name = allergen.Name,
+            Kind = allergen.Kind,
+            Severity = severity,
+            Notes = allergen.Notes,
+            TestResult = allergen.TestResult,
+        });
+
+        await LoadAsync();
+        Snackbar.Add($"「{allergen.Name}」已改为{severity.ToChinese()}", Severity.Success);
+    }
+
+    private void BeginEdit(ChildAllergen allergen)
+    {
+        _editingId = allergen.Id;
+        _formKind = allergen.Kind;
+        _formNotes = allergen.Notes;
+        _formTestResult = allergen.TestResult;
+    }
+
+    private void CancelEdit()
+    {
+        _editingId = null;
+        _formNotes = null;
+        _formTestResult = null;
+    }
+
+    private async Task SaveEditAsync(ChildAllergen allergen)
+    {
+        var userId = await GetUserIdAsync();
+
+        try
+        {
+            await ChildService.UpdateAllergenAsync(userId, allergen.Id, new ChildAllergen
+            {
+                Name = allergen.Name,
+                Kind = _formKind,
+                Severity = allergen.Severity,
+                Notes = _formNotes,
+                TestResult = _formTestResult,
+            });
+
+            CancelEdit();
+            await LoadAsync();
+            Snackbar.Add("已保存", Severity.Success);
+        }
+        catch (ArgumentException ex)
+        {
+            _messageSeverity = Severity.Error;
+            _message = ex.Message;
+        }
+    }
+
+    private async Task DeleteAsync(ChildAllergen allergen)
+    {
+        var userId = await GetUserIdAsync();
+        await ChildService.DeleteAllergenAsync(userId, allergen.Id);
+
+        _pendingDeleteId = null;
+        await LoadAsync();
+        Snackbar.Add($"已删除「{allergen.Name}」", Severity.Success);
+    }
+}

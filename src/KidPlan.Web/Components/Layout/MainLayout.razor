@@ -1,0 +1,56 @@
+@inherits LayoutComponentBase
+
+<MudLayout>
+    @* MudBlazor 的 Provider 放在布局里，才能和页面处于**同一个交互式渲染作用域**。
+       放进 App.razor 的 <body> 是不行的：那里是静态渲染，和
+       <Routes @rendermode="..."> 的交互式树是两个作用域，级联值不互通，
+       运行时会报 Missing <MudPopoverProvider />，下拉框和菜单都弹不出来。 *@
+    <MudThemeProvider Theme="AppTheme.Theme" />
+    <MudPopoverProvider />
+    <MudDialogProvider CloseButton="true" />
+    <MudSnackbarProvider />
+
+    <MudAppBar Elevation="1" Color="Color.Primary" Class="app-bar">
+        <MudIconButton Icon="@Icons.Material.Filled.Menu"
+                       Color="Color.Inherit"
+                       Edge="Edge.Start"
+                       OnClick="ToggleDrawer"
+                       aria-label="打开菜单" />
+        <MudText Typo="Typo.h6" Class="app-title">🌱 KidPlan</MudText>
+        <MudSpacer />
+        <ChildSwitcher />
+        <MudIconButton Icon="@Icons.Material.Filled.ManageAccounts"
+                       Color="Color.Inherit"
+                       Href="/account/manage"
+                       aria-label="账号设置" />
+    </MudAppBar>
+
+    <MudDrawer @bind-Open="_drawerOpen"
+               Elevation="2"
+               Variant="DrawerVariant.Responsive"
+               Breakpoint="Breakpoint.Md"
+               ClipMode="DrawerClipMode.Always">
+        <NavMenu />
+    </MudDrawer>
+
+    @* 这里刻意不写 Class="pa-4"：MudBlazor 的 .pa-4 是 `padding:16px !important`，
+       会把 MudMainContent 自带的 `padding-top:calc(var(--mud-appbar-height) ...)`
+       一起覆盖掉，页面标题就被顶部的 AppBar 挡住了（.main-content 的间距在 app.css 里）。 *@
+    <MudMainContent Class="main-content">
+        <MudContainer MaxWidth="MaxWidth.Large" Class="pa-0">
+            @Body
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+
+<div id="blazor-error-ui" data-nosnippet>
+    页面出现了一个未处理的错误。
+    <a href="." class="reload">重新加载</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private bool _drawerOpen = true;
+
+    private void ToggleDrawer() => _drawerOpen = !_drawerOpen;
+}

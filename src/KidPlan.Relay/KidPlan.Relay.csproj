@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>KidPlan.Relay</AssemblyName>
+    <RootNamespace>KidPlan.Relay</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+  </PropertyGroup>
+
+  <!--
+    中继是要拷到别人电脑上单独跑的绿色小程序，所以刻意不引用任何 NuGet 包，
+    也不引用 KidPlan.Web。那边拖进来的是整个 ASP.NET Core + EF Core + MySQL 驱动，
+    为了转发几个 HTTP 请求背这么大一坨没必要，拷贝体积也难看。
+    发布命令见 README.md（默认框架依赖；要免装运行时的单文件包就加 RID 与 self-contained 开关）。
+  -->
+
+</Project>

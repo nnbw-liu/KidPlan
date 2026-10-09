@@ -1,0 +1,1183 @@
+@page "/settings/ai"
+@attribute [Authorize]
+@inherits UserAwareComponent
+
+@inject IAiSettingsStore Settings
+@inject IRelayNodeService RelayNodes
+@inject IAiChatClient ChatClient
+@inject ISnackbar Snackbar
+@inject NavigationManager NavigationManager
+
+<PageTitle>模型设置 · KidPlan</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-1">🤖 模型设置</MudText>
+<MudText Typo="Typo.body2" Class="text-muted-sm mb-4">
+    接的是标准 OpenAI 接口（<code>POST /chat/completions</code>、<code>GET /models</code>），
+    所以 DeepSeek、通义、Kimi、OpenAI 官方，以及 LM Studio / Ollama / vLLM / one-api
+    这类本地或自建服务都能接。模型名可以手工输入，不依赖 <code>/models</code> 接口。
+</MudText>
+
+@if (_loading)
+{
+    <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+}
+else
+{
+    @if (!_isAdmin)
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mb-3">
+            你当前不是管理员，所以看不到「全局配置」——那是服务器上的配置文件，改了会影响这个部署上的所有账号。
+            你可以在下面配自己的一套模型（存在你自己的账号里），改完立刻生效。
+        </MudAlert>
+    }
+
+    <MudTabs Elevation="1" Rounded="true" ApplyEffectsToContainer="true" TabPanelsClass="pa-4">
+        @if (_isAdmin)
+        {
+        @* ============================================================
+           全局配置：写在 config/ai.json 里，改完立刻生效，不用重启服务。
+           一个部署通常只配一次，所有人共用。只有 admin 角色看得到。
+           ============================================================ *@
+        <MudTabPanel Text="全局配置" Icon="@Icons.Material.Filled.Dns">
+            <MudAlert Severity="@(_info.LastError is null ? Severity.Info : Severity.Error)"
+                      Variant="Variant.Outlined" Dense="true" Class="mb-4">
+                <div>
+                    配置文件：<code>@_info.Path</code>
+                    @if (!_info.FileExists)
+                    {
+                        <span>（还不存在，保存后会创建）</span>
+                    }
+                    @if (!_info.Writable)
+                    {
+                        <strong style="color:#b3252a">　⚠️ 这个文件当前不可写，保存会失败</strong>
+                    }
+                </div>
+                @if (_info.LastLoadedAt is { } loadedAt)
+                {
+                    <div class="text-muted-sm">上次读取：@loadedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")（改文件后 400 毫秒内自动生效）</div>
+                }
+                @if (_info.LastError is { } error)
+                {
+                    <div style="color:#b3252a">
+                        上次读取失败，正在沿用上一份可用配置：@error
+                        <div class="text-muted-sm">修好 JSON 之后点下面的「重新从文件加载」，或者干脆保存一次覆盖它。</div>
+                    </div>
+                }
+            </MudAlert>
+
+            <div class="d-flex flex-wrap gap-2 mb-3">
+                <MudButton Variant="Variant.Outlined" Size="Size.Small"
+                           StartIcon="@Icons.Material.Filled.Refresh" OnClick="ReloadGlobal">
+                    重新从文件加载
+                </MudButton>
+                <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Primary"
+                           Disabled="_savingGlobal"
+                           StartIcon="@Icons.Material.Filled.Save" OnClick="SaveGlobalAsync">
+                    保存全局配置
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Secondary"
+                           StartIcon="@Icons.Material.Filled.Add" OnClick="AddProvider">
+                    ＋ 添加端点
+                </MudButton>
+            </div>
+
+            @* 有改动就把保存按钮顶到眼前。之前这个按钮只待在页签最上面，
+               加完端点、表单收起来之后人在下面，很容易以为「没有保存按钮」。 *@
+            @if (_globalDirty)
+            {
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Filled" Dense="false" Class="mb-3">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <span>有改动还没写进 <code>config/ai.json</code>，现在还没生效。</span>
+                        <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Warning"
+                                   Disabled="_savingGlobal"
+                                   StartIcon="@Icons.Material.Filled.Save" OnClick="SaveGlobalAsync">
+                            保存全局配置
+                        </MudButton>
+                    </div>
+                </MudAlert>
+            }
+
+            @* ---------- 端点列表 ---------- *@
+            @if (_global.Providers.Count == 0)
+            {
+                <MudPaper Elevation="0" Class="pa-6 text-center mb-4">
+                    <MudText Typo="Typo.body2" Class="text-muted-sm">
+                        还没有配置任何端点。点「添加端点」开始——最常见的两个例子：
+                        <br />公网：https://api.deepseek.com/v1 ＋ 你的 API Key
+                        <br />本机：http://127.0.0.1:1234/v1（LM Studio）不用填 Key，配合「本地中继」就能从云端连回家里
+                    </MudText>
+                </MudPaper>
+            }
+
+            @foreach (var provider in _global.Providers)
+            {
+                <MudPaper Elevation="1" Class="pa-3 mb-2">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <MudText Typo="Typo.subtitle1">@(string.IsNullOrWhiteSpace(provider.Name) ? "(未命名端点)" : provider.Name)</MudText>
+
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">
+                            @(provider.Transport == AiTransport.LocalRelay ? "本地中继" : "服务端直连")
+                        </MudChip>
+
+                        @if (!provider.Enabled)
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Outlined">已停用</MudChip>
+                        }
+
+                        @if (string.Equals(provider.Id, _global.DefaultProviderId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Filled">默认</MudChip>
+                        }
+
+                        @if (provider.Transport == AiTransport.LocalRelay)
+                        {
+                            var node = _nodes.FirstOrDefault(n => n.Id == provider.RelayNodeId);
+                            var online = provider.RelayNodeId is { } id
+                                ? _onlineNodeIds.Contains(id)
+                                : _onlineNodeIds.Count > 0;
+
+                            <MudChip T="string" Size="Size.Small"
+                                     Color="@(online ? Color.Success : Color.Error)"
+                                     Variant="Variant.Filled">
+                                @(online ? "中继在线" : "中继离线")
+                                @if (node is not null)
+                                {
+                                    <span>· @node.Name</span>
+                                }
+                            </MudChip>
+                        }
+
+                        <MudSpacer />
+
+                        <MudButton Size="Size.Small" Variant="Variant.Text"
+                                   OnClick="@(() => TestProviderAsync(provider))">
+                            测试连接
+                        </MudButton>
+                        <MudButton Size="Size.Small" Variant="Variant.Text"
+                                   OnClick="@(() => FetchModelsAsync(provider))">
+                            获取模型列表
+                        </MudButton>
+                        <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary"
+                                   StartIcon="@Icons.Material.Filled.Edit"
+                                   OnClick="@(() => BeginEditProvider(provider))">
+                            编辑
+                        </MudButton>
+                        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error"
+                                       title="删除端点" OnClick="@(() => RemoveProvider(provider))" />
+                    </div>
+
+                    <MudText Typo="Typo.caption" Class="text-muted-sm mt-1">
+                        @provider.BaseUrl
+                        @if (!string.IsNullOrWhiteSpace(provider.ApiKey))
+                        {
+                            <span>　Key：@IAiSettingsStore.Mask(provider.ApiKey)</span>
+                        }
+                        @if (provider.Models.Count > 0)
+                        {
+                            <span>　模型：@string.Join("、", provider.Models)</span>
+                        }
+                        else
+                        {
+                            <span>　（还没有记下模型名，建议手工填一个）</span>
+                        }
+                    </MudText>
+
+                    @if (_providerMessage is not null && _providerMessageId == provider.Id)
+                    {
+                        <MudAlert Severity="@_providerMessageSeverity" Variant="Variant.Outlined" Dense="true" Class="mt-2">
+                            @_providerMessage
+                        </MudAlert>
+                    }
+                </MudPaper>
+            }
+
+            @* ---------- 端点编辑表单 ---------- *@
+            @if (_editingProvider is not null)
+            {
+                <MudPaper Elevation="3" Class="pa-4 pa-md-6 mb-4 mt-3">
+                    <MudText Typo="Typo.h6" Class="mb-3">编辑端点</MudText>
+
+                    <MudGrid>
+                        <MudItem xs="12" md="4">
+                            <MudTextField T="string" @bind-Value="_editingProvider.Name" Label="显示名称 *"
+                                          Variant="Variant.Outlined" Placeholder="例如：家里的 LM Studio" />
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudTextField T="string" @bind-Value="_editingProvider.Id" Label="标识 Id *"
+                                          Variant="Variant.Outlined"
+                                          HelperText="唯一标识，「默认端点」和账号覆盖都引用它，改了等于换了一个端点" />
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="AiTransport" @bind-Value="_editingProvider.Transport" Label="调用方式 *"
+                                       Variant="Variant.Outlined">
+                                <MudSelectItem T="AiTransport" Value="AiTransport.Direct">
+                                    服务端直连
+                                </MudSelectItem>
+                                <MudSelectItem T="AiTransport" Value="AiTransport.LocalRelay">
+                                    本地中继（连自己电脑上的模型）
+                                </MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+
+                        <MudItem xs="12" md="8">
+                            <MudTextField T="string" @bind-Value="_editingProvider.BaseUrl" Label="接口根地址 *"
+                                          Variant="Variant.Outlined"
+                                          Placeholder="https://api.deepseek.com/v1"
+                                          HelperText="@(_editingProvider.Transport == AiTransport.LocalRelay
+                                              ? "填「中继那台电脑看到」的地址，例如 http://127.0.0.1:1234/v1 —— 服务器上写的地址跟它没关系"
+                                              : "要带版本段，应用会拼 /chat/completions 和 /models")" />
+                        </MudItem>
+
+                        <MudItem xs="12" md="4">
+                            <MudTextField T="string" @bind-Value="_editingProvider.ApiKey" Label="API Key"
+                                          Variant="Variant.Outlined"
+                                          Placeholder="本地服务一般留空"
+                                          HelperText="已经在用的 Key 显示为掩码，原样保存不会覆盖真实值" />
+                        </MudItem>
+
+                        @if (_editingProvider.Transport == AiTransport.LocalRelay)
+                        {
+                            <MudItem xs="12" md="6">
+                                <MudSelect T="int?" Value="_editingProvider.RelayNodeId"
+                                           ValueChanged="@(v => _editingProvider.RelayNodeId = v)"
+                                           Label="用哪个中继节点" Variant="Variant.Outlined"
+                                           HelperText="留空表示「本账号下任意一个在线的节点」">
+                                    <MudSelectItem T="int?" Value="@((int?)null)">任意在线节点</MudSelectItem>
+                                    @foreach (var node in _nodes)
+                                    {
+                                        <MudSelectItem T="int?" Value="@((int?)node.Id)">
+                                            @node.Name @(_onlineNodeIds.Contains(node.Id) ? "（在线）" : "（离线）")
+                                        </MudSelectItem>
+                                    }
+                                </MudSelect>
+                                <MudText Typo="Typo.caption" Class="text-muted-sm mt-1">
+                                    还没有节点？
+                                    <a href="/settings/relay">去「本机中继」页创建令牌</a>，
+                                    然后在家里的电脑上跑 KidPlan.Relay。
+                                </MudText>
+                            </MudItem>
+                        }
+
+                        <MudItem xs="12" md="6">
+                            <MudSwitch T="bool" @bind-Value="_editingProvider.Enabled" Color="Color.Primary"
+                                       Label="启用这个端点" />
+                        </MudItem>
+
+                        <MudItem xs="12" md="6">
+                            <MudSelect T="string" MultiSelection="true"
+                                       SelectedValues="_formModels"
+                                       SelectedValuesChanged="@(v => _formModels = v?.ToList() ?? [])"
+                                       Label="可用模型（可多选）" Variant="Variant.Outlined"
+                                       HelperText="列表是候选，真正的值看下面的标签；可以直接手工添加">
+                                @foreach (var model in _modelCandidates)
+                                {
+                                    <MudSelectItem T="string" Value="model">@model</MudSelectItem>
+                                }
+                            </MudSelect>
+
+                            <div class="d-flex flex-wrap gap-1 mt-2">
+                                @foreach (var model in _formModels)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Filled">
+                                        @model
+                                    </MudChip>
+                                }
+                                @if (_formModels.Count == 0)
+                                {
+                                    <MudText Typo="Typo.caption" Class="text-muted-sm">
+                                        一个模型名都没有。可以直接在下面输入框里手工写，例如 qwen2.5-7b-instruct。
+                                    </MudText>
+                                }
+                            </div>
+                        </MudItem>
+
+                        <MudItem xs="12" md="6">
+                            <div class="d-flex gap-2 align-end">
+                                <MudTextField T="string" @bind-Value="_newModel" Label="手工添加模型名"
+                                              Variant="Variant.Outlined" Placeholder="例如：deepseek-chat" />
+                                <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Primary"
+                                           OnClick="AddModelManually">
+                                    添加
+                                </MudButton>
+                            </div>
+                            <MudText Typo="Typo.caption" Class="text-muted-sm mt-1">
+                                不依赖 <code>/models</code>：有些本地服务压根不实现这个接口，或者名字跟实际部署的不一样。
+                            </MudText>
+                        </MudItem>
+
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" @bind-Value="_editingProvider.Note" Label="备注"
+                                          Variant="Variant.Outlined" Lines="2"
+                                          Placeholder="例如：家里台式机，晚上才开机" MaxLength="500" />
+                        </MudItem>
+
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" @bind-Value="_headersText" Label="额外请求头"
+                                          Variant="Variant.Outlined" Lines="2"
+                                          Placeholder="一行一个，Key: Value"
+                                          HelperText="某些网关需要，例如 HTTP-Referer: https://example.com" />
+                        </MudItem>
+                    </MudGrid>
+
+                    <div class="d-flex flex-wrap gap-2 mt-3">
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                                   Disabled="_savingGlobal"
+                                   StartIcon="@Icons.Material.Filled.Save" OnClick="CommitAndSaveGlobalAsync">
+                            保存这个端点
+                        </MudButton>
+                        <MudButton Variant="Variant.Outlined" Color="Color.Default"
+                                   StartIcon="@Icons.Material.Filled.Check" OnClick="CommitProvider">
+                            只放进列表，稍后一起保存
+                        </MudButton>
+                        <MudButton Variant="Variant.Text" OnClick="CancelProvider">取消</MudButton>
+                        <MudButton Variant="Variant.Outlined" Color="Color.Secondary"
+                                   OnClick="@(() => TestProviderAsync(_editingProvider))">
+                            用这组参数测试连接
+                        </MudButton>
+                        <MudButton Variant="Variant.Outlined" Color="Color.Secondary"
+                                   OnClick="@(() => FetchModelsAsync(_editingProvider))">
+                            用这组参数拉模型列表
+                        </MudButton>
+                    </div>
+                </MudPaper>
+            }
+
+            <MudDivider Class="my-5" />
+
+            @* ---------- 默认值 ---------- *@
+            <MudText Typo="Typo.h6" Class="mb-3">默认端点与模型</MudText>
+            <MudGrid>
+                <MudItem xs="12" md="6">
+                    <MudSelect T="string" Value="_global.DefaultProviderId"
+                               ValueChanged="@(v => { _global.DefaultProviderId = v; _global.DefaultModel = null; })"
+                               Label="默认端点" Variant="Variant.Outlined">
+                        @foreach (var provider in _global.Providers.Where(p => p.Enabled))
+                        {
+                            <MudSelectItem T="string" Value="provider.Id">@provider.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="6">
+                    <MudSelect T="string" Value="_global.DefaultModel" ValueChanged="@(v => _global.DefaultModel = v)"
+                               Label="默认模型" Variant="Variant.Outlined"
+                               HelperText="下拉里是端点记下的模型名，也可以直接手工输入">
+                        @foreach (var model in DefaultModelCandidates)
+                        {
+                            <MudSelectItem T="string" Value="model">@model</MudSelectItem>
+                        }
+                    </MudSelect>
+                    <MudTextField T="string" @bind-Value="_global.DefaultModel" Label="或手工输入默认模型名"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense" Class="mt-2" />
+                </MudItem>
+            </MudGrid>
+
+            <MudDivider Class="my-5" />
+
+            @* ---------- 推荐参数 ---------- *@
+            <MudText Typo="Typo.h6" Class="mb-1">饮食推荐参数</MudText>
+            <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">
+                前置周期最多 30 天——这是硬上限，不给放开。把几个月的饮食全塞进提示词，
+                小模型反而抓不住重点，还容易把上下文挤爆。
+            </MudText>
+            <MudGrid>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="int" @bind-Value="_global.Recommendation.MaxLookbackDays"
+                                     Label="前置周期上限（天）" Variant="Variant.Outlined"
+                                     Min="1" Max="30" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="int" @bind-Value="_global.Recommendation.DefaultLookbackDays"
+                                     Label="默认前置周期（天）" Variant="Variant.Outlined"
+                                     Min="1" Max="_global.Recommendation.MaxLookbackDays" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="double" @bind-Value="_global.Recommendation.Temperature"
+                                     Label="温度" Variant="Variant.Outlined"
+                                     Min="0" Max="2" Step="0.1"
+                                     HelperText="推荐要稳定，默认 0.4 就挺好" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="int" @bind-Value="_global.Recommendation.TimeoutSeconds"
+                                     Label="超时（秒）" Variant="Variant.Outlined"
+                                     Min="10" Max="1800" Step="10"
+                                     HelperText="本地小模型吐字慢，给宽松点" />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudNumericField T="int" @bind-Value="_global.Recommendation.MaxOutputTokens"
+                                     Label="最大输出 token" Variant="Variant.Outlined"
+                                     Min="200" Max="32000" Step="100"
+                                     HelperText="推理模型会把额度先花在思考上，建议 8000 以上" />
+                </MudItem>
+            </MudGrid>
+        </MudTabPanel>
+        }
+
+        @* ============================================================
+           我的覆盖：存在数据库里，只写「和全局不一样的地方」。
+           全局改了、自己没覆盖的部分会跟着变。
+           ============================================================ *@
+        <MudTabPanel Text="我的账号覆盖" Icon="@Icons.Material.Filled.Person">
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mb-4">
+                这里的设置只对当前账号生效，存在数据库里，别的账号看不到、也改不了。
+                没覆盖到的项一直跟着全局配置走——所以管理员改了全局地址，你不用管也能跟着更新。
+            </MudAlert>
+
+            <div class="d-flex flex-wrap gap-2 mb-3">
+                <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Primary"
+                           Disabled="_savingOverride" StartIcon="@Icons.Material.Filled.Save"
+                           OnClick="SaveOverrideAsync">
+                    保存我的覆盖
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Error"
+                           StartIcon="@Icons.Material.Filled.Clear" OnClick="ClearOverrideAsync">
+                    清除覆盖（完全跟随全局）
+                </MudButton>
+            </div>
+
+            @if (_overrideDirty)
+            {
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Filled" Dense="false" Class="mb-3">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <span>有改动还没保存到你的账号。</span>
+                        <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Warning"
+                                   Disabled="_savingOverride"
+                                   StartIcon="@Icons.Material.Filled.Save" OnClick="SaveOverrideAsync">
+                            保存我的覆盖
+                        </MudButton>
+                    </div>
+                </MudAlert>
+            }
+
+            @if (!_hasOverride)
+            {
+                <MudAlert Severity="Severity.Normal" Variant="Variant.Text" Dense="true" Class="mb-3">
+                    当前账号没有任何覆盖，全部跟随全局配置。
+                </MudAlert>
+            }
+
+            <MudGrid>
+                <MudItem xs="12" md="4">
+                    <MudSelect T="string" Value="_override.DefaultProviderId"
+                               ValueChanged="@(v => { _override.DefaultProviderId = v; })"
+                               Label="默认端点" Variant="Variant.Outlined"
+                               HelperText="留空 = 跟随全局">
+                        <MudSelectItem T="string" Value="@((string?)null)">跟随全局</MudSelectItem>
+                        @foreach (var provider in _effective.Providers.Where(p => p.Enabled))
+                        {
+                            <MudSelectItem T="string" Value="provider.Id">@provider.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="4">
+                    <MudTextField T="string" @bind-Value="_override.DefaultModel" Label="默认模型"
+                                  Variant="Variant.Outlined"
+                                  Placeholder="留空 = 跟随全局"
+                                  HelperText="可以手工输入任何模型名" />
+                </MudItem>
+                <MudItem xs="12" md="4">
+                    <MudSwitch T="bool" Value="_overrideRecommendation" ValueChanged="SetOverrideRecommendation"
+                               Color="Color.Primary" Label="单独设置推荐参数（前置周期 / 温度 / 超时）" />
+                </MudItem>
+
+                @if (_overrideRecommendation)
+                {
+                    var rec = _override.Recommendation ??= new AiRecommendationOptions();
+                    <MudItem xs="6" md="3">
+                        <MudNumericField T="int" @bind-Value="rec.MaxLookbackDays" Label="前置周期上限（天）"
+                                         Variant="Variant.Outlined" Min="1" Max="30" />
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudNumericField T="int" @bind-Value="rec.DefaultLookbackDays" Label="默认前置周期（天）"
+                                         Variant="Variant.Outlined" Min="1" Max="rec.MaxLookbackDays" />
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudNumericField T="double" @bind-Value="rec.Temperature" Label="温度"
+                                         Variant="Variant.Outlined" Min="0" Max="2" Step="0.1" />
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudNumericField T="int" @bind-Value="rec.TimeoutSeconds" Label="超时（秒）"
+                                         Variant="Variant.Outlined" Min="10" Max="1800" Step="10" />
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudNumericField T="int" @bind-Value="rec.MaxOutputTokens" Label="最大输出 token"
+                                         Variant="Variant.Outlined" Min="200" Max="32000" Step="100"
+                                         HelperText="推理模型会把额度先花在思考上，建议 8000 以上" />
+                    </MudItem>
+                }
+            </MudGrid>
+
+            <MudDivider Class="my-4" />
+
+            <MudText Typo="Typo.subtitle2" Class="mb-2">端点覆盖</MudText>
+            <MudText Typo="Typo.body2" Class="text-muted-sm mb-3">
+                「本账号停用」= 这个账号看不到这个端点（比如全局配了公网接口，你只想用自己的本地模型）。
+                「覆盖参数」= 只改这个账号看到的地址 / Key / 模型名，不影响别人。
+            </MudText>
+
+            @foreach (var provider in _effective.Providers)
+            {
+                var isRemoved = _override.RemovedProviderIds.Contains(provider.Id, StringComparer.OrdinalIgnoreCase);
+                var local = _override.Providers.FirstOrDefault(p =>
+                    string.Equals(p.Id, provider.Id, StringComparison.OrdinalIgnoreCase));
+                var isOverridden = local is not null;
+
+                <MudPaper Elevation="0" Class="pa-3 mb-2">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <MudText Typo="Typo.body1">@provider.Name</MudText>
+                        <MudText Typo="Typo.caption" Class="text-muted-sm">@provider.Id</MudText>
+                        <MudSpacer />
+                        <MudCheckBox T="bool" Value="isRemoved"
+                                     ValueChanged="@(v => SetRemoved(provider.Id, v))"
+                                     Color="Color.Error" Label="本账号停用" Dense="true" />
+                        <MudCheckBox T="bool" Value="isOverridden"
+                                     ValueChanged="@(v => SetOverridden(provider.Id, v))"
+                                     Color="Color.Primary" Label="覆盖参数" Dense="true" />
+                    </div>
+
+                    @if (isOverridden && local is not null)
+                    {
+                        <MudGrid Class="mt-2">
+                            <MudItem xs="12" md="4">
+                                <MudTextField T="string" @bind-Value="local.Name" Label="显示名称"
+                                              Variant="Variant.Outlined" Margin="Margin.Dense" />
+                            </MudItem>
+                            <MudItem xs="12" md="4">
+                                <MudTextField T="string" @bind-Value="local.BaseUrl" Label="接口根地址"
+                                              Variant="Variant.Outlined" Margin="Margin.Dense" />
+                            </MudItem>
+                            <MudItem xs="12" md="4">
+                                <MudTextField T="string" @bind-Value="local.ApiKey" Label="API Key"
+                                              Variant="Variant.Outlined" Margin="Margin.Dense"
+                                              Placeholder="填 '（跟随全局）' 就用全局那把"
+                                              HelperText="全局 Key 不会显示在这里；留空表示这个账号用空 Key" />
+                            </MudItem>
+                            <MudItem xs="12" md="6">
+                                <MudTextField T="string"
+                                              Value="@string.Join(", ", local.Models)"
+                                              ValueChanged="@(v => local.Models = SplitList(v))"
+                                              Label="模型名（逗号分隔）" Variant="Variant.Outlined"
+                                              Margin="Margin.Dense" />
+                            </MudItem>
+                            <MudItem xs="6" md="3">
+                                <MudSwitch T="bool" @bind-Value="local.Enabled" Color="Color.Primary"
+                                           Label="启用" />
+                            </MudItem>
+                            <MudItem xs="6" md="3">
+                                <MudSelect T="AiTransport" @bind-Value="local.Transport" Label="调用方式"
+                                           Variant="Variant.Outlined" Margin="Margin.Dense">
+                                    <MudSelectItem T="AiTransport" Value="AiTransport.Direct">服务端直连</MudSelectItem>
+                                    <MudSelectItem T="AiTransport" Value="AiTransport.LocalRelay">本地中继</MudSelectItem>
+                                </MudSelect>
+                            </MudItem>
+                        </MudGrid>
+                    }
+                </MudPaper>
+            }
+
+            <div class="d-flex flex-wrap gap-2 mt-2">
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Secondary"
+                           StartIcon="@Icons.Material.Filled.Add" OnClick="AddPersonalProvider">
+                    ＋ 只给本账号加一个端点
+                </MudButton>
+            </div>
+
+            @foreach (var local in _override.Providers.Where(p => _effective.Providers.All(
+                g => !string.Equals(g.Id, p.Id, StringComparison.OrdinalIgnoreCase))).ToList())
+            {
+                <MudPaper Elevation="1" Class="pa-3 mt-2">
+                    <div class="d-flex align-center flex-wrap gap-2">
+                        <MudChip T="string" Size="Size.Small" Color="Color.Secondary" Variant="Variant.Filled">
+                            仅本账号
+                        </MudChip>
+                        <MudText Typo="Typo.body2">@(string.IsNullOrWhiteSpace(local.Name) ? "(未命名)" : local.Name)</MudText>
+                        <MudSpacer />
+                        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error"
+                                       title="移除" OnClick="@(() => _override.Providers.Remove(local))" />
+                    </div>
+                    <MudGrid Class="mt-2">
+                        <MudItem xs="12" md="3">
+                            <MudTextField T="string" @bind-Value="local.Id" Label="标识 Id *"
+                                          Variant="Variant.Outlined" Margin="Margin.Dense" />
+                        </MudItem>
+                        <MudItem xs="12" md="3">
+                            <MudTextField T="string" @bind-Value="local.Name" Label="显示名称"
+                                          Variant="Variant.Outlined" Margin="Margin.Dense" />
+                        </MudItem>
+                        <MudItem xs="12" md="3">
+                            <MudTextField T="string" @bind-Value="local.BaseUrl" Label="接口根地址"
+                                          Variant="Variant.Outlined" Margin="Margin.Dense" />
+                        </MudItem>
+                        <MudItem xs="12" md="3">
+                            <MudTextField T="string" @bind-Value="local.ApiKey" Label="API Key"
+                                          Variant="Variant.Outlined" Margin="Margin.Dense" />
+                        </MudItem>
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string"
+                                          Value="@string.Join(", ", local.Models)"
+                                          ValueChanged="@(v => local.Models = SplitList(v))"
+                                          Label="模型名（逗号分隔）" Variant="Variant.Outlined"
+                                          Margin="Margin.Dense" />
+                        </MudItem>
+                        <MudItem xs="6" md="3">
+                            <MudSelect T="AiTransport" @bind-Value="local.Transport" Label="调用方式"
+                                       Variant="Variant.Outlined" Margin="Margin.Dense">
+                                <MudSelectItem T="AiTransport" Value="AiTransport.Direct">服务端直连</MudSelectItem>
+                                <MudSelectItem T="AiTransport" Value="AiTransport.LocalRelay">本地中继</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="6" md="3">
+                            <MudSwitch T="bool" @bind-Value="local.Enabled" Color="Color.Primary" Label="启用" />
+                        </MudItem>
+                    </MudGrid>
+                    @* 就在表单里给一个保存按钮：保存按钮只在页签顶部的话，
+                       加完端点人已经在页面下方，很容易以为「没地方保存」。 *@
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                        <MudButton Variant="Variant.Filled" Size="Size.Small" Color="Color.Primary"
+                                   Disabled="_savingOverride"
+                                   StartIcon="@Icons.Material.Filled.Save" OnClick="SaveOverrideAsync">
+                            保存我的覆盖
+                        </MudButton>
+                    </div>
+                </MudPaper>
+            }
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    private bool _loading = true;
+    private bool _savingGlobal;
+    private bool _savingOverride;
+
+    private AiSettingsDocument _global = new();
+    private AiSettingsDocument _effective = new();
+    private AiSettingsOverride _override = new();
+    private AiGlobalLoadInfo _info = new(string.Empty, false, false, null, null);
+    private bool _hasOverride;
+    private bool _overrideRecommendation;
+
+    private IReadOnlyList<RelayNode> _nodes = [];
+    private HashSet<int> _onlineNodeIds = [];
+
+    private AiProviderConfig? _editingProvider;
+    private string _headersText = string.Empty;
+    private List<string> _modelCandidates = [];
+    private List<string> _formModels = [];
+    private string? _newModel;
+
+    private string? _providerMessage;
+    private string? _providerMessageId;
+    private Severity _providerMessageSeverity = Severity.Info;
+
+    private string _userId = string.Empty;
+
+    /// <summary>当前账号是不是管理员——只有管理员看得到「全局配置」页签。</summary>
+    private bool _isAdmin;
+
+    // 「有改动还没保存」的判定：保存/加载时各留一份 JSON 快照，跟当前对象比。
+    // 前端做了脏检查，用户才不会「改了半天不知道有没有生效」。
+    private string _globalSnapshot = string.Empty;
+    private string _overrideSnapshot = string.Empty;
+    private bool _globalDirty;
+    private bool _overrideDirty;
+
+    private static readonly System.Text.Json.JsonSerializerOptions SnapshotOptions = new()
+    {
+        WriteIndented = false,
+    };
+
+    private static string Snapshot<T>(T value)
+        => System.Text.Json.JsonSerializer.Serialize(value, SnapshotOptions);
+
+    private void TakeGlobalSnapshot()
+    {
+        _globalSnapshot = Snapshot(_global);
+        _globalDirty = false;
+    }
+
+    private void TakeOverrideSnapshot()
+    {
+        _overrideSnapshot = Snapshot(_override);
+        _overrideDirty = false;
+    }
+
+    /// <summary>每次渲染前重算脏标记：字段太多，逐个挂 ValueChanged 容易漏。</summary>
+    protected override void OnAfterRender(bool firstRender)
+    {
+        var globalDirty = !string.Equals(_globalSnapshot, Snapshot(_global), StringComparison.Ordinal);
+        var overrideDirty = !string.Equals(_overrideSnapshot, Snapshot(_override), StringComparison.Ordinal);
+
+        if (globalDirty != _globalDirty || overrideDirty != _overrideDirty)
+        {
+            _globalDirty = globalDirty;
+            _overrideDirty = overrideDirty;
+            StateHasChanged();
+        }
+    }
+
+    private IReadOnlyList<string> DefaultModelCandidates =>
+        _global.Providers
+            .Where(p => string.Equals(p.Id, _global.DefaultProviderId, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(p => p.Models)
+            .ToList();
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _userId = await GetUserIdAsync();
+
+        var user = await UserManager.FindByIdAsync(_userId);
+        _isAdmin = user is not null && await UserManager.IsInRoleAsync(user, KidPlanRoles.Admin);
+
+        _info = Settings.GlobalInfo;
+        _global = Settings.GetGlobal();
+        _effective = await Settings.GetEffectiveAsync(_userId);
+
+        var saved = await Settings.GetOverrideAsync(_userId);
+        _hasOverride = saved is not null;
+        _override = saved ?? new AiSettingsOverride();
+        _overrideRecommendation = _override.Recommendation is not null;
+
+        // 加载完立刻留快照：这时候当然「没有未保存的改动」。
+        TakeGlobalSnapshot();
+        TakeOverrideSnapshot();
+
+        _nodes = await RelayNodes.ListAsync(_userId);
+        _onlineNodeIds = _nodes
+            .Where(n => n.LastSeenAt is { } seen && DateTimeOffset.Now - seen < TimeSpan.FromSeconds(90))
+            .Select(n => n.Id)
+            .ToHashSet();
+
+        _loading = false;
+    }
+
+    /// <summary>
+    /// 表单里的「保存这个端点」：先把表单内容并进文档，再立刻写进配置文件。
+    /// 这样「加端点 → 保存」是一步到位的，不用再去页签顶部找另一个按钮。
+    /// </summary>
+    private async Task CommitAndSaveGlobalAsync()
+    {
+        if (!CommitProvider(quiet: true))
+        {
+            // 校验没过（比如 Id 重复），_providerMessage 已经说清楚了，别把半成品写进文件。
+            return;
+        }
+
+        await SaveGlobalAsync();
+    }
+
+    private async Task SaveGlobalAsync()
+    {
+        _savingGlobal = true;
+        try
+        {
+            await Settings.SaveGlobalAsync(_global);
+            TakeGlobalSnapshot();
+            Snackbar.Add("全局配置已写入配置文件，立即生效", Severity.Success);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"保存失败：{ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _savingGlobal = false;
+        }
+    }
+
+    private void ReloadGlobal()
+    {
+        _info = Settings.ReloadGlobal();
+        _global = Settings.GetGlobal();
+        TakeGlobalSnapshot();
+
+        Snackbar.Add(
+            _info.LastError is null ? "已重新从文件加载" : $"读取失败，仍沿用上一份配置：{_info.LastError}",
+            _info.LastError is null ? Severity.Success : Severity.Error);
+    }
+
+    private void AddProvider()
+    {
+        var provider = new AiProviderConfig
+        {
+            Id = $"provider-{_global.Providers.Count + 1}",
+            Name = "新端点",
+            Transport = AiTransport.Direct,
+            Enabled = true,
+        };
+
+        BeginEditProvider(provider, isNew: true);
+    }
+
+    private void BeginEditProvider(AiProviderConfig provider, bool isNew = false)
+    {
+        _providerMessage = null;
+        _providerMessageId = null;
+
+        // 复制一份再编辑：点「取消」时得能干净地丢掉改动，
+        // 直接在列表对象上改的话，取消也回不去了。
+        _editingProvider = new AiProviderConfig
+        {
+            Id = provider.Id,
+            Name = provider.Name,
+            BaseUrl = provider.BaseUrl,
+            ApiKey = provider.ApiKey,
+            Transport = provider.Transport,
+            RelayNodeId = provider.RelayNodeId,
+            Enabled = provider.Enabled,
+            Models = [.. provider.Models],
+            ExtraHeaders = new Dictionary<string, string>(provider.ExtraHeaders),
+            Note = provider.Note,
+        };
+
+        _formModels = [.. provider.Models];
+        _modelCandidates = [.. provider.Models];
+        _headersText = string.Join(Environment.NewLine,
+            provider.ExtraHeaders.Select(kv => $"{kv.Key}: {kv.Value}"));
+
+        _editingIsNew = isNew;
+        _editingOriginalId = provider.Id;
+    }
+
+    private bool _editingIsNew;
+    private string? _editingOriginalId;
+
+    private bool CommitProvider(bool quiet = false)
+    {
+        if (_editingProvider is null)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_editingProvider.Id) || string.IsNullOrWhiteSpace(_editingProvider.Name))
+        {
+            _providerMessageSeverity = Severity.Error;
+            _providerMessage = "标识 Id 和显示名称都要填。";
+            _providerMessageId = _editingProvider.Id;
+            return false;
+        }
+
+        _editingProvider.Id = _editingProvider.Id.Trim();
+        _editingProvider.Name = _editingProvider.Name.Trim();
+        _editingProvider.BaseUrl = _editingProvider.BaseUrl.Trim().TrimEnd('/');
+        _editingProvider.Models = [.. _formModels];
+        _editingProvider.ExtraHeaders = ParseHeaders(_headersText);
+
+        if (_editingIsNew)
+        {
+            if (_global.Providers.Any(p => string.Equals(p.Id, _editingProvider.Id, StringComparison.OrdinalIgnoreCase)))
+            {
+                _providerMessageSeverity = Severity.Error;
+                _providerMessage = $"已经有一个 Id 为「{_editingProvider.Id}」的端点了，换一个标识。";
+                _providerMessageId = _editingProvider.Id;
+                return false;
+            }
+
+            _global.Providers.Add(_editingProvider);
+        }
+        else
+        {
+            var index = _global.Providers.FindIndex(p =>
+                string.Equals(p.Id, _editingOriginalId, StringComparison.OrdinalIgnoreCase));
+
+            if (index >= 0)
+            {
+                _global.Providers[index] = _editingProvider;
+            }
+            else
+            {
+                _global.Providers.Add(_editingProvider);
+            }
+
+            // 改了 Id 的话，默认端点引用也要跟着改，否则默认端点会指向一个不存在的 Id。
+            if (!string.Equals(_editingOriginalId, _editingProvider.Id, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(_global.DefaultProviderId, _editingOriginalId, StringComparison.OrdinalIgnoreCase))
+            {
+                _global.DefaultProviderId = _editingProvider.Id;
+            }
+        }
+
+        _editingProvider = null;
+
+        if (!quiet)
+        {
+            Snackbar.Add("端点已放进列表，记得点「保存全局配置」写进文件", Severity.Info);
+        }
+
+        return true;
+    }
+
+    private void CommitProvider() => CommitProvider(quiet: false);
+
+    private void CancelProvider() => _editingProvider = null;
+
+    private void RemoveProvider(AiProviderConfig provider)
+    {
+        _global.Providers.Remove(provider);
+
+        if (string.Equals(_global.DefaultProviderId, provider.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            _global.DefaultProviderId = _global.Providers.FirstOrDefault(p => p.Enabled)?.Id;
+        }
+
+        if (_editingProvider is not null
+            && string.Equals(_editingProvider.Id, provider.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            _editingProvider = null;
+        }
+
+        Snackbar.Add($"已移除「{provider.Name}」，记得保存", Severity.Info);
+    }
+
+    private void AddModelManually()
+    {
+        if (string.IsNullOrWhiteSpace(_newModel))
+        {
+            return;
+        }
+
+        var model = _newModel.Trim();
+
+        if (!_modelCandidates.Contains(model, StringComparer.OrdinalIgnoreCase))
+        {
+            _modelCandidates.Add(model);
+        }
+
+        if (!_formModels.Contains(model, StringComparer.OrdinalIgnoreCase))
+        {
+            _formModels.Add(model);
+        }
+
+        _newModel = null;
+    }
+
+    private async Task TestProviderAsync(AiProviderConfig provider)
+    {
+        _providerMessageId = provider.Id;
+        _providerMessageSeverity = Severity.Info;
+        _providerMessage = "正在测试…";
+
+        try
+        {
+            var (ok, message) = await ChatClient.TestAsync(
+                provider,
+                provider.Models.FirstOrDefault(),
+                _userId);
+
+            _providerMessageSeverity = ok ? Severity.Success : Severity.Error;
+            _providerMessage = message;
+
+            Snackbar.Add(ok ? "连接正常" : "连接失败", ok ? Severity.Success : Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            _providerMessageSeverity = Severity.Error;
+            _providerMessage = ex.Message;
+        }
+    }
+
+    private async Task FetchModelsAsync(AiProviderConfig provider)
+    {
+        _providerMessageId = provider.Id;
+        _providerMessageSeverity = Severity.Info;
+        _providerMessage = "正在获取模型列表…";
+
+        try
+        {
+            var (ok, models, error) = await ChatClient.ListModelsAsync(provider, _userId);
+
+            if (!ok)
+            {
+                _providerMessageSeverity = Severity.Warning;
+                _providerMessage = $"{error}　拿不到也没关系——直接在「手工添加模型名」里输入就行，"
+                    + "推荐功能只需要一个模型名，不强依赖这个接口。";
+                return;
+            }
+
+            _providerMessageSeverity = Severity.Success;
+            _providerMessage = $"拿到 {models.Count} 个模型：{string.Join("、", models.Take(20))}";
+
+            if (_editingProvider is not null
+                && string.Equals(_editingProvider.Id, provider.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var model in models)
+                {
+                    if (!_modelCandidates.Contains(model, StringComparer.OrdinalIgnoreCase))
+                    {
+                        _modelCandidates.Add(model);
+                    }
+                }
+            }
+            else
+            {
+                foreach (var model in models)
+                {
+                    if (!provider.Models.Contains(model, StringComparer.OrdinalIgnoreCase))
+                    {
+                        provider.Models.Add(model);
+                    }
+                }
+            }
+
+            Snackbar.Add("已获取模型列表，记得保存", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            _providerMessageSeverity = Severity.Error;
+            _providerMessage = ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 账号覆盖
+    // ------------------------------------------------------------------
+
+    private void SetOverrideRecommendation(bool enabled)
+    {
+        _overrideRecommendation = enabled;
+
+        if (enabled)
+        {
+            // 预填全局值：观感上「打开开关」不该把参数全部归零。
+            _override.Recommendation ??= new AiRecommendationOptions
+            {
+                MaxLookbackDays = _effective.Recommendation.MaxLookbackDays,
+                DefaultLookbackDays = _effective.Recommendation.DefaultLookbackDays,
+                Temperature = _effective.Recommendation.Temperature,
+                TimeoutSeconds = _effective.Recommendation.TimeoutSeconds,
+                MaxOutputTokens = _effective.Recommendation.MaxOutputTokens,
+            };
+        }
+        else
+        {
+            _override.Recommendation = null;
+        }
+    }
+
+    private void SetRemoved(string providerId, bool removed)
+    {
+        _override.RemovedProviderIds.RemoveAll(id => string.Equals(id, providerId, StringComparison.OrdinalIgnoreCase));
+
+        if (removed)
+        {
+            _override.RemovedProviderIds.Add(providerId);
+        }
+    }
+
+    private void SetOverridden(string providerId, bool overridden)
+    {
+        if (overridden)
+        {
+            if (_override.Providers.Any(p => string.Equals(p.Id, providerId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            var global = _effective.Providers.FirstOrDefault(p =>
+                string.Equals(p.Id, providerId, StringComparison.OrdinalIgnoreCase));
+
+            _override.Providers.Add(new AiProviderConfig
+            {
+                Id = providerId,
+                Name = global?.Name ?? providerId,
+                BaseUrl = global?.BaseUrl ?? string.Empty,
+                // Key 不预填：全局 Key 是敏感的，而且留空能让家长明确意识到「这里填了就是用这里的」。
+                ApiKey = null,
+                Transport = global?.Transport ?? AiTransport.Direct,
+                RelayNodeId = global?.RelayNodeId,
+                Enabled = global?.Enabled ?? true,
+                Models = [.. global?.Models ?? []],
+            });
+        }
+        else
+        {
+            _override.Providers.RemoveAll(p => string.Equals(p.Id, providerId, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private void AddPersonalProvider()
+    {
+        _override.Providers.Add(new AiProviderConfig
+        {
+            Id = $"my-provider-{_override.Providers.Count + 1}",
+            Name = "我的端点",
+            Enabled = true,
+        });
+    }
+
+    private async Task SaveOverrideAsync()
+    {
+        _savingOverride = true;
+        try
+        {
+            var isEmpty = string.IsNullOrWhiteSpace(_override.DefaultProviderId)
+                && string.IsNullOrWhiteSpace(_override.DefaultModel)
+                && _override.Recommendation is null
+                && _override.Providers.Count == 0
+                && _override.RemovedProviderIds.Count == 0;
+
+            // 一条有效内容都没有就直接删掉这行：留着一条空 JSON
+            // 会让界面一直显示「有覆盖」，容易让人以为改过什么。
+            await Settings.SaveOverrideAsync(_userId, isEmpty ? null : _override);
+
+            Snackbar.Add(isEmpty ? "没有需要覆盖的内容，已恢复完全跟随全局" : "我的覆盖已保存",
+                Severity.Success);
+
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"保存失败：{ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _savingOverride = false;
+        }
+    }
+
+    private async Task ClearOverrideAsync()
+    {
+        await Settings.SaveOverrideAsync(_userId, null);
+        Snackbar.Add("已清除覆盖，完全跟随全局配置", Severity.Success);
+        await LoadAsync();
+    }
+
+    private static List<string> SplitList(string? value) => value is null
+        ? []
+        : value
+            .Split([',', '，', '、', ';', '；'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>把「一行一个 Key: Value」解析成字典。写错的行直接跳过，不该因为一个请求头写错就整个保存不上。</summary>
+    private static Dictionary<string, string> ParseHeaders(string? text)
+    {
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return headers;
+        }
+
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separator = line.IndexOf(':');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..separator].Trim();
+            var value = line[(separator + 1)..].Trim();
+
+            if (key.Length > 0)
+            {
+                headers[key] = value;
+            }
+        }
+
+        return headers;
+    }
+}

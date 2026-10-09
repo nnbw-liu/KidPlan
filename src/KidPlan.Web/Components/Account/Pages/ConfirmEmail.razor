@@ -1,0 +1,67 @@
+@page "/Account/ConfirmEmail"
+
+@using Microsoft.AspNetCore.Identity
+@using KidPlan.Web.Data
+
+@inject UserManager<ApplicationUser> UserManager
+@inject IdentityRedirectManager RedirectManager
+
+<PageTitle>@(succeeded ? "邮箱已确认" : "邮箱确认失败") · KidPlan</PageTitle>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">🌱 KidPlan</div>
+        <p class="auth-sub">@(succeeded ? "邮箱确认成功" : "邮箱确认失败")</p>
+
+        <StatusMessage Message="@(succeeded ? message : $"Error: {message}")" />
+
+        @if (succeeded)
+        {
+            <a class="auth-btn auth-btn-link" href="Account/Login">去登录</a>
+        }
+        else
+        {
+            <div class="auth-links">
+                <a href="@resendUrl">重新发送确认邮件</a>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private bool succeeded;
+    private string message = string.Empty;
+    private string resendUrl = "Account/ResendEmailConfirmation";
+
+    [SupplyParameterFromQuery]
+    private string? UserId { get; set; }
+
+    [SupplyParameterFromQuery]
+    private string? Code { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (string.IsNullOrEmpty(UserId) || string.IsNullOrEmpty(Code))
+        {
+            // 用户在地址栏里乱改、或者邮件客户端把链接截断了。
+            succeeded = false;
+            message = "这个确认链接不完整，请使用邮件里的完整链接，或重新发送确认邮件。";
+            return;
+        }
+
+        var user = await UserManager.FindByIdAsync(UserId);
+        if (user is null)
+        {
+            RedirectManager.RedirectTo("Account/InvalidUser");
+            return;
+        }
+
+        resendUrl = $"Account/ResendEmailConfirmation?email={Uri.EscapeDataString(user.Email ?? string.Empty)}";
+
+        var result = await UserManager.ConfirmEmailAsync(user, Code);
+        succeeded = result.Succeeded;
+        message = result.Succeeded
+            ? "邮箱已经确认，现在可以登录了。"
+            : "这个确认链接已失效或已经用过（每个链接只能用一次）。请重新发送确认邮件。";
+    }
+}

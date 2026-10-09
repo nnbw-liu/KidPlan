@@ -1,0 +1,14 @@
+@using KidPlan.Web.Components.Account.Shared
+@* 全局启用交互式服务端渲染：布局、抽屉、菜单、对话框、图表都需要交互。
+   账号相关页面（Components/Account/Pages）通过 [ExcludeFromInteractiveRouting] 自动退回静态 SSR，
+   这样 SignInManager 才能正常写认证 Cookie。 *@
+<Router AppAssembly="typeof(Program).Assembly" NotFoundPage="typeof(Pages.NotFound)">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)">
+            <NotAuthorized>
+                <RedirectToLogin />
+            </NotAuthorized>
+        </AuthorizeRouteView>
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
+    </Found>
+</Router>

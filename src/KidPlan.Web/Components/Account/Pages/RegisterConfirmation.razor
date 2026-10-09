@@ -1,0 +1,29 @@
+@page "/Account/RegisterConfirmation"
+
+<PageTitle>确认邮件已发送 · KidPlan</PageTitle>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">🌱 KidPlan</div>
+        <p class="auth-sub">还差一步：确认邮箱</p>
+
+        <div class="auth-alert auth-alert-success" role="alert">
+            确认邮件已经发送到 <strong>@Email</strong>。<br />
+            请打开邮件里的「确认邮箱」链接完成确认，之后就能登录了。
+        </div>
+
+        <div class="auth-links">
+            <div>没收到？看看垃圾邮件，或者 <a href="@ResendUrl">重新发送一封</a></div>
+            <div style="margin-top:6px"><a href="Account/Login">返回登录</a></div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery]
+    private string? Email { get; set; }
+
+    private string ResendUrl => string.IsNullOrEmpty(Email)
+        ? "Account/ResendEmailConfirmation"
+        : $"Account/ResendEmailConfirmation?email={Uri.EscapeDataString(Email)}";
+}

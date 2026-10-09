@@ -1,0 +1,108 @@
+@page "/Account/ResendEmailConfirmation"
+
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Identity
+@using KidPlan.Web.Data
+@using KidPlan.Web.Services
+
+@inject UserManager<ApplicationUser> UserManager
+@inject IEmailSender<ApplicationUser> EmailSender
+@inject AccountLinkBuilder LinkBuilder
+@inject IdentityRedirectManager RedirectManager
+@inject ILogger<ResendEmailConfirmation> Logger
+
+<PageTitle>重新发送确认邮件 · KidPlan</PageTitle>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">🌱 KidPlan</div>
+        <p class="auth-sub">重新发送确认邮件</p>
+
+        <StatusMessage Message="@errorMessage" />
+
+        <EditForm Model="Input" method="post" OnValidSubmit="OnValidSubmitAsync" FormName="resend-email-confirmation">
+            <DataAnnotationsValidator />
+            <ValidationSummary class="auth-validation-summary" role="alert" />
+
+            <div class="auth-field">
+                <label for="Input.Email">注册时填的邮箱</label>
+                <InputText @bind-Value="Input.Email"
+                           id="Input.Email"
+                           class="auth-input"
+                           autocomplete="username"
+                           placeholder="you@example.com" />
+                <ValidationMessage For="() => Input.Email" class="auth-error" />
+            </div>
+
+            <button type="submit" class="auth-btn">发送确认邮件</button>
+        </EditForm>
+
+        <div class="auth-links">
+            <a href="Account/Login">返回登录</a>
+        </div>
+    </div>
+</div>
+
+@code {
+    private string? errorMessage;
+
+    [SupplyParameterFromForm]
+    private InputModel Input { get; set; } = default!;
+
+    [SupplyParameterFromQuery]
+    private string? Email { get; set; }
+
+    protected override void OnInitialized()
+    {
+        Input ??= new();
+
+        if (string.IsNullOrEmpty(Input.Email))
+        {
+            Input.Email = Email ?? string.Empty;
+        }
+    }
+
+    private async Task OnValidSubmitAsync()
+    {
+        var user = await UserManager.FindByEmailAsync(Input.Email);
+        if (user is null)
+        {
+            // 不在这里暴露“该邮箱是否注册过”，统一跳到“已发送”提示页。
+            RedirectManager.RedirectTo("Account/RegisterConfirmation", new() { ["email"] = Input.Email });
+            return;
+        }
+
+        if (user.EmailConfirmed)
+        {
+            errorMessage = "Error: 这个邮箱已经确认过了，可以直接登录。";
+            return;
+        }
+
+        var code = await UserManager.GenerateEmailConfirmationTokenAsync(user);
+        var link = LinkBuilder.Build("Account/ConfirmEmail", new Dictionary<string, object?>
+        {
+            ["userId"] = user.Id,
+            ["code"] = code,
+        });
+
+        try
+        {
+            await EmailSender.SendConfirmationLinkAsync(user, Input.Email, link);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "重新发送确认邮件失败：{Email}", Input.Email);
+            errorMessage = "Error: 确认邮件发送失败，请稍后再试；如果一直失败，请让管理员检查 SMTP 配置。";
+            return;
+        }
+
+        RedirectManager.RedirectTo("Account/RegisterConfirmation", new() { ["email"] = Input.Email });
+    }
+
+    private sealed class InputModel
+    {
+        [Required(ErrorMessage = "请输入邮箱")]
+        [EmailAddress(ErrorMessage = "邮箱格式不正确")]
+        public string Email { get; set; } = string.Empty;
+    }
+}
